@@ -123,8 +123,8 @@ export const DashboardLayout = ({ children }: DashboardLayoutProps) => {
         </header>
 
         {/* Dynamic Page Content */}
-        <div className="page-content">
-          <div style={{ maxWidth: '1600px', margin: '0 auto' }}>
+        <div className="page-content" style={{ overflowX: 'hidden' }}>
+          <div style={{ maxWidth: '1600px', margin: '0 auto', width: '100%' }}>
             {children}
           </div>
         </div>

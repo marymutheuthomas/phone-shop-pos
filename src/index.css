@@ -522,4 +522,54 @@ tbody td {
 }
 .animate-fadeIn { animation: fadeIn 0.25s ease both; }
 
+/* ─── 14. MOBILE OPTIMIZATIONS ──────────────────────────────── */
+
+/* Table Scroll Wrapper */
+.table-responsive {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  margin-bottom: 1rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--surface-border);
+}
+
+/* Touch Targets for Mobile */
+@media (max-width: 768px) {
+  button, 
+  .btn,
+  input,
+  select,
+  .nav-link {
+    min-height: 48px !important; /* Minimum touch target for thumbs */
+  }
+
+  .page-content {
+    padding: 16px 12px !important;
+  }
+
+  h1 { font-size: 1.5rem; }
+  
+  .card {
+    padding: 16px !important;
+  }
+
+  /* Stacked card layout for small tables if needed */
+  .mobile-card-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+}
+
+/* Hide scrollbars but keep functionality for a cleaner mobile look if desired */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+
 .bg-warning { background: #FEF3C7; }

@@ -58,32 +58,38 @@ const POSDash = () => {
 
       {/* ── Page Header ───────────────────────────────────── */}
       <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '16px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '14px', width: '100%', maxWidth: '400px' }}>
           <div style={{
-            width: '52px', height: '52px', borderRadius: '14px',
+            width: '48px', height: '48px', borderRadius: '12px',
             background: 'var(--navy)', color: '#fff',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             flexShrink: 0
           }}>
-            <Terminal size={22} />
+            <Terminal size={20} />
           </div>
-          <div>
-            <h1 style={{ marginBottom: '2px' }}>Checkout</h1>
-            <p style={{ fontSize: '0.82rem', margin: 0 }}>
-              Location: <strong>{user?.shopId}</strong> · Cashier: <strong>{user?.name}</strong>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h1 style={{ marginBottom: '0', fontSize: 'clamp(1.25rem, 4vw, 1.75rem)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Checkout</h1>
+            <p style={{ fontSize: '0.75rem', margin: 0, color: 'var(--text-muted)' }}>
+              {user?.shopName} · {user?.name}
             </p>
           </div>
         </div>
 
         {/* Search bar */}
-        <div style={{ position: 'relative', display: 'flex', alignItems: 'center', flexGrow: 1, maxWidth: '420px' }}>
-          <Search size={17} style={{ position: 'absolute', left: '16px', color: 'var(--text-muted)', pointerEvents: 'none' }} />
+        <div style={{ position: 'relative', display: 'flex', alignItems: 'center', flexGrow: 1, width: '100%', maxWidth: '500px' }}>
+          <Search size={18} style={{ position: 'absolute', left: '16px', color: 'var(--text-muted)', pointerEvents: 'none' }} />
           <input
             type="text"
-            placeholder="Lookup SKU, Name or Category…"
+            placeholder="Search SKU or Name..."
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
-            style={{ paddingLeft: '44px', width: '100%' }}
+            style={{ 
+              paddingLeft: '44px', 
+              width: '100%',
+              height: '48px',
+              borderRadius: '12px',
+              border: '1.5px solid var(--surface-border)'
+            }}
           />
         </div>
       </div>
@@ -130,8 +136,8 @@ const POSDash = () => {
             ) : (
               <div style={{
                 display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
-                gap: '14px'
+                gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))',
+                gap: '12px'
               }}>
                 {products.map(product => {
                   const lowStock   = product.availableQty > 0 && product.availableQty < 10;
