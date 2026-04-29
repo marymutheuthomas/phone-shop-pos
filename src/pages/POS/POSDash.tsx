@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { Search, ShoppingBag, Terminal, CheckCircle } from 'lucide-react';
+import { Search, ShoppingBag, Terminal, CheckCircle, ShoppingCart } from 'lucide-react';
 import Cart from '../../components/POS/Cart';
+import { RecentSalesFeed } from '../../components/POS/RecentSalesFeed';
 import { formatKSh } from '../../utils/formatters';
 import { db } from '../../lib/db/schema';
 import { useLiveQuery } from '../../hooks/useLiveQuery';
@@ -10,134 +11,217 @@ const POSDash = () => {
   const { user } = useAuth();
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Fetch products and their current quantity in our local inventory cache
   const products = useLiveQuery(async () => {
     let items = await db.products.toArray();
-    
-    // Filter by search query manually for flexibility
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
-      items = items.filter(i => i.name.toLowerCase().includes(q) || i.sku.toLowerCase().includes(q) || i.category.toLowerCase().includes(q));
+      items = items.filter(i =>
+        i.name.toLowerCase().includes(q) ||
+        i.sku.toLowerCase().includes(q) ||
+        i.category.toLowerCase().includes(q)
+      );
     }
-
-    const inventory = user?.shopId 
+    const inventory = user?.shopId
       ? await db.inventory.where('shopId').equals(user.shopId).toArray()
       : await db.inventory.toArray();
-    
-    // Map to include available stock
     return items.map(p => {
       const itemStock = inventory.find(inv => inv.productId === p.id);
-      return {
-        ...p,
-        availableQty: itemStock ? itemStock.qty : 0
-      };
+      return { ...p, availableQty: itemStock ? itemStock.qty : 0 };
     });
   }, [searchQuery]) || [];
 
   const addToCart = async (productId: string) => {
-    // Check if it already exists in the cart
+    const inv = await db.inventory.where({ shopId: user!.shopId, productId }).first();
+    if (!inv || inv.qty <= 0) {
+      alert('❌ Out of stock. This product cannot be added to the cart.');
+      return;
+    }
     const existing = await db.active_cart.where({ productId }).first();
     if (existing) {
+      if (existing.qty >= inv.qty) {
+        alert(`⚠️ Only ${inv.qty} units available. Cannot add more.`);
+        return;
+      }
       await db.active_cart.update(existing.id!, { qty: existing.qty + 1 });
     } else {
-      await db.active_cart.add({ productId, qty: 1 });
+      await db.active_cart.add({
+        id: `cart_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        productId,
+        qty: 1,
+        priceType: 'RETAIL'
+      } as any);
     }
   };
 
   return (
-    <div className="animate-fade-in h-[calc(100vh-100px)] flex flex-col gap-6 p-4">
-      {/* Dynamic Dashboard Header */}
-      <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-white/40 backdrop-blur-md p-6 rounded-[2.5rem] border border-white shadow-xl shadow-zinc-200/50">
-        <div className="flex items-center gap-4">
-            <div className="w-14 h-14 bg-zinc-900 rounded-3xl flex items-center justify-center shadow-2xl">
-                <Terminal className="text-white" size={24} />
-            </div>
-            <div>
-                <h1 className="text-2xl font-black text-zinc-900 tracking-tight">Vantage Terminal</h1>
-                <p className="text-[10px] text-zinc-400 font-black uppercase tracking-widest leading-none mt-1">
-                    Node: {user?.shopId} • Operator: {user?.name}
-                </p>
-            </div>
-        </div>
-        
-        <div className="relative w-full md:w-96 flex items-center">
-            <Search className="absolute left-6 text-zinc-400" size={18} />
-            <input 
-                type="text" 
-                placeholder="Lookup SKU, Name or Category..." 
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-                className="w-full bg-white border-2 border-zinc-100 h-16 pl-14 pr-6 rounded-2xl font-black text-zinc-900 outline-none focus:border-indigo-600 transition-all shadow-sm placeholder:text-zinc-200"
-            />
-        </div>
-      </header>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
 
-      <div className="flex gap-6 h-full overflow-hidden">
-        {/* Main Product Arena */}
-        <div className="flex-1 flex flex-col gap-4 overflow-hidden">
-          <div className="bg-zinc-50 border border-zinc-200 rounded-[2.5rem] flex-1 p-8 overflow-y-auto relative">
+      {/* ── Page Header ───────────────────────────────────── */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '16px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+          <div style={{
+            width: '52px', height: '52px', borderRadius: '14px',
+            background: 'var(--navy)', color: '#fff',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            flexShrink: 0
+          }}>
+            <Terminal size={22} />
+          </div>
+          <div>
+            <h1 style={{ marginBottom: '2px' }}>Checkout</h1>
+            <p style={{ fontSize: '0.82rem', margin: 0 }}>
+              Location: <strong>{user?.shopId}</strong> · Cashier: <strong>{user?.name}</strong>
+            </p>
+          </div>
+        </div>
+
+        {/* Search bar */}
+        <div style={{ position: 'relative', display: 'flex', alignItems: 'center', flexGrow: 1, maxWidth: '420px' }}>
+          <Search size={17} style={{ position: 'absolute', left: '16px', color: 'var(--text-muted)', pointerEvents: 'none' }} />
+          <input
+            type="text"
+            placeholder="Lookup SKU, Name or Category…"
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            style={{ paddingLeft: '44px', width: '100%' }}
+          />
+        </div>
+      </div>
+
+      {/* ── Main 2-col grid: Products | Cart ─────────────── */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(1, 1fr)',    /* mobile: single column */
+        gap: '24px',
+      }}
+        className="pos-grid"
+      >
+        {/* Products Panel */}
+        <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+          {/* Panel header */}
+          <div style={{
+            padding: '20px 24px',
+            borderBottom: '1px solid var(--surface-border)',
+            display: 'flex', alignItems: 'center', gap: '10px'
+          }}>
+            <ShoppingBag size={18} style={{ color: 'var(--gold)' }} />
+            <h3 style={{ margin: 0 }}>Product Catalogue</h3>
+            <span style={{
+              marginLeft: 'auto', fontSize: '0.75rem', fontWeight: 600,
+              color: 'var(--text-muted)'
+            }}>
+              {products.length} items
+            </span>
+          </div>
+
+          <div style={{ padding: '20px', overflowY: 'auto', maxHeight: 'calc(100vh - 320px)', minHeight: '400px' }}>
             {products.length === 0 ? (
-               <div className="h-full flex flex-col items-center justify-center text-center">
-                  <div className="w-20 h-20 bg-zinc-100 rounded-3xl flex items-center justify-center mb-4">
-                      <ShoppingBag className="text-zinc-300" size={32} />
-                  </div>
-                  <h3 className="text-lg font-black text-zinc-900">Catalogue Empty</h3>
-                  <p className="text-zinc-400 text-sm font-medium mt-1">Adjust your search or add new products.</p>
-               </div>
+              /* ── Empty State ── */
+              <div style={{
+                display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                padding: '64px 24px', gap: '12px', textAlign: 'center'
+              }}>
+                <ShoppingCart size={48} style={{ color: '#6B88A8', opacity: 0.5 }} />
+                <h3 style={{ color: 'var(--text-muted)', fontWeight: 500 }}>Catalogue Empty</h3>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.875rem', margin: 0 }}>
+                  Adjust your search or add new products to inventory.
+                </p>
+              </div>
             ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-6">
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
+                gap: '14px'
+              }}>
                 {products.map(product => {
-                    const lowStock = product.availableQty < 10;
-                    const outOfStock = product.availableQty <= 0;
+                  const lowStock   = product.availableQty > 0 && product.availableQty < 10;
+                  const outOfStock = product.availableQty <= 0;
+                  return (
+                    <div
+                      key={product.id}
+                      onClick={() => !outOfStock && addToCart(product.id)}
+                      style={{
+                        background: '#fff',
+                        border: `1.5px solid ${outOfStock ? '#E2E8F0' : lowStock ? '#F59E0B' : 'var(--surface-border)'}`,
+                        borderRadius: 'var(--radius-md)',
+                        padding: '16px',
+                        cursor: outOfStock ? 'not-allowed' : 'pointer',
+                        opacity: outOfStock ? 0.45 : 1,
+                        transition: 'box-shadow var(--transition-fast), border-color var(--transition-fast)',
+                        boxShadow: 'var(--shadow-sm)',
+                      }}
+                      onMouseEnter={e => !outOfStock && ((e.currentTarget as HTMLElement).style.boxShadow = 'var(--shadow-md)')}
+                      onMouseLeave={e => ((e.currentTarget as HTMLElement).style.boxShadow = 'var(--shadow-sm)')}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px' }}>
+                        <span style={{
+                          fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase',
+                          letterSpacing: '0.06em', color: 'var(--text-muted)'
+                        }}>
+                          {product.category}
+                        </span>
+                        {outOfStock && <CheckCircle size={14} style={{ color: '#EF4444' }} />}
+                        {lowStock && <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#F59E0B', display: 'block' }} />}
+                      </div>
 
-                    return (
-                        <div 
-                        key={product.id} 
-                        onClick={() => addToCart(product.id)}
-                        className={`group relative p-6 bg-white border rounded-[2rem] transition-all duration-300 cursor-pointer overflow-hidden
-                            ${outOfStock ? 'opacity-60 grayscale' : 'hover:scale-[1.03] hover:shadow-2xl hover:shadow-zinc-200 hover:border-indigo-600'}
-                            ${lowStock && !outOfStock ? 'border-amber-100' : 'border-zinc-100'}`}
-                        >
-                        {/* Background Deco */}
-                        <div className="absolute top-0 right-0 w-24 h-24 bg-zinc-50 rounded-full -mr-12 -mt-12 transition-transform group-hover:scale-150" />
-                        
-                        <div className="relative z-10">
-                            <div className="flex justify-between items-start mb-6">
-                                <span className="text-[10px] font-black text-zinc-300 uppercase tracking-widest">{product.category}</span>
-                                {lowStock && !outOfStock && <span className="w-2 h-2 bg-amber-500 rounded-full animate-ping" />}
-                                {outOfStock && <CheckCircle className="text-rose-500" size={16} />}
-                            </div>
+                      <h3 style={{ margin: '0 0 4px', fontSize: '0.9rem', lineHeight: 1.3 }}>{product.name}</h3>
+                      <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', margin: '0 0 14px' }}>SKU: {product.sku}</p>
 
-                            <h3 className="font-black text-zinc-900 leading-tight mb-2 h-10 line-clamp-2">{product.name}</h3>
-                            <p className="text-[9px] font-black text-zinc-400 uppercase tracking-widest mb-4">SKU: {product.sku}</p>
-                            
-                            <div className="mt-8 pt-6 border-t border-zinc-50 flex justify-between items-end">
-                                <div>
-                                    <div className="text-2xl font-black text-indigo-600 tracking-tight">
-                                        {formatKSh(product.basePrice)}
-                                    </div>
-                                    <div className="text-[9px] font-black text-zinc-400 uppercase tracking-widest mt-1">
-                                        WS: {formatKSh(product.wholesalePrice)}
-                                    </div>
-                                </div>
-                                
-                                <div className={`px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-wider
-                                    ${outOfStock ? 'bg-rose-50 text-rose-600' : product.availableQty > 20 ? 'bg-emerald-50 text-emerald-600' : 'bg-amber-50 text-amber-600'}`}>
-                                    {outOfStock ? 'Sold Out' : `${product.availableQty} Units`}
-                                </div>
-                            </div>
-                        </div>
-                        </div>
-                    );
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        {/* Price — monospace tabular */}
+                        <span style={{
+                          fontFamily: 'ui-monospace, "Cascadia Code", "Fira Code", monospace',
+                          fontVariantNumeric: 'tabular-nums',
+                          fontSize: '0.95rem', fontWeight: 700,
+                          color: 'var(--navy)',
+                        }}>
+                          {formatKSh(product.basePrice)}
+                        </span>
+
+                        {/* Stock badge */}
+                        <span style={{
+                          padding: '3px 8px', borderRadius: '6px',
+                          fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase',
+                          fontFamily: 'ui-monospace, monospace',
+                          fontVariantNumeric: 'tabular-nums',
+                          background: outOfStock ? '#FEE2E2' : product.availableQty > 20 ? '#DCFCE7' : '#FEF3C7',
+                          color:      outOfStock ? '#B91C1C' : product.availableQty > 20 ? '#15803D' : '#92400E',
+                        }}>
+                          {outOfStock ? 'Sold Out' : `${product.availableQty} units`}
+                        </span>
+                      </div>
+                    </div>
+                  );
                 })}
-                </div>
+              </div>
             )}
           </div>
         </div>
 
-        {/* Integrated Cart Component */}
-        <Cart />
+        {/* Cart Panel */}
+        <div className="card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          <Cart />
+        </div>
       </div>
+
+      {/* ── Recent Sales Feed ────────────────────────────── */}
+      <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+        <RecentSalesFeed />
+      </div>
+
+      {/* ── Responsive breakpoint override ─────────────── */}
+      <style>{`
+        @media (min-width: 1024px) {
+          .pos-grid {
+            grid-template-columns: 2fr 1fr !important;
+          }
+        }
+        @media (min-width: 768px) and (max-width: 1023px) {
+          .pos-grid {
+            grid-template-columns: 1.5fr 1fr !important;
+          }
+        }
+      `}</style>
     </div>
   );
 };

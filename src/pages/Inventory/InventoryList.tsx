@@ -5,17 +5,45 @@ import { useAuth } from '../../context/AuthContext';
 import { useSyncEngine } from '../../hooks/useSyncEngine';
 import { formatKSh } from '../../utils/formatters';
 import { Search, Pencil, Trash2, Plus, X, PackageOpen } from 'lucide-react';
-import { v4 as uuidv4 } from 'uuid';
 
+const mono: React.CSSProperties = {
+  fontFamily: 'ui-monospace, "Cascadia Code", monospace',
+  fontVariantNumeric: 'tabular-nums',
+};
+
+/* ── Shared table header cell style ──────────────────────────────────────── */
+const th: React.CSSProperties = {
+  padding: '8px 20px',
+  textAlign: 'left',
+  fontSize: '0.65rem',
+  fontWeight: 700,
+  textTransform: 'uppercase',
+  letterSpacing: '0.10em',
+  color: '#547A95',
+  background: '#fff',
+  whiteSpace: 'nowrap',
+  borderBottom: '1px solid #E8EDF2',
+};
+const td: React.CSSProperties = {
+  padding: '8px 20px',
+  verticalAlign: 'middle',
+  borderBottom: '1px solid #E8EDF2',
+  background: '#fff',
+};
+
+/* ── Empty-form template ─────────────────────────────────────────────────── */
 const emptyForm = {
   name: '',
   category: '',
-  buyingPrice: '',
+  wholesalePrice: '',
   sellingPrice: '',
   initialStock: '',
-  requires_imei: false,
+  reorderLevel: '10',
 };
 
+/* ══════════════════════════════════════════════════════════════════════════
+   COMPONENT
+══════════════════════════════════════════════════════════════════════════ */
 const InventoryList = () => {
   const { user } = useAuth();
   useSyncEngine(user?.shopId || '');
@@ -23,28 +51,18 @@ const InventoryList = () => {
   const isAdmin = user?.role === 'ADMIN';
 
   // ── UI State ────────────────────────────────────────────────────────────────
-  const [search, setSearch] = useState('');
-  const [refreshCounter, setRefreshCounter] = useState(0);
-
-  // Add modal
-  const [isAddOpen, setIsAddOpen] = useState(false);
-  const [newProduct, setNewProduct] = useState(emptyForm);
-
-  // Edit modal
-  const [isEditOpen, setIsEditOpen] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editProduct, setEditProduct] = useState(emptyForm);
-
-  // Delete confirmation
-  const [deletingId, setDeletingId] = useState<string | null>(null);
-  const [deletingName, setDeletingName] = useState('');
-
-  // Feedback
+  const [search,          setSearch]         = useState('');
+  const [refreshCounter,  setRefreshCounter] = useState(0);
+  const [isAddOpen,       setIsAddOpen]      = useState(false);
+  const [newProduct,      setNewProduct]     = useState(emptyForm);
+  const [isEditOpen,      setIsEditOpen]     = useState(false);
+  const [editingId,       setEditingId]      = useState<string | null>(null);
+  const [editProduct,     setEditProduct]    = useState(emptyForm);
+  const [deletingId,      setDeletingId]     = useState<string | null>(null);
+  const [deletingName,    setDeletingName]   = useState('');
   const [toast, setToast] = useState<{ msg: string; type: 'success' | 'error' } | null>(null);
 
-  // ── Helpers ─────────────────────────────────────────────────────────────────
-  const loadProducts = () => setRefreshCounter(prev => prev + 1);
-
+  const loadProducts = () => setRefreshCounter(p => p + 1);
   useEffect(() => { loadProducts(); }, []);
 
   const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
@@ -52,12 +70,11 @@ const InventoryList = () => {
     setTimeout(() => setToast(null), 3000);
   };
 
-  // ── Live Query ──────────────────────────────────────────────────────────────
+  // ── Live Query ───────────────────────────────────────────────────────────────
   const inventoryData = useLiveQuery(async () => {
     if (!user) return [];
-    const products = await db.products.toArray();
+    const products  = await db.products.toArray();
     const inventory = await db.inventory.where({ shopId: user.shopId }).toArray();
-
     return products.map(p => {
       const stock = inventory.find(inv => inv.productId === p.id);
       return { ...p, qty: stock ? stock.qty : 0 };
@@ -66,62 +83,54 @@ const InventoryList = () => {
       i.sku?.toLowerCase().includes(search.toLowerCase())
     );
   }, [user, search, refreshCounter]) || [];
-  // ── UI HELPERS: Open Modals ───────────────────────────────────────────
+
+  const lowStockCount = inventoryData.filter(i => i.qty <= (i.reorderLevel || 10)).length;
+
+  // ── UI helpers ───────────────────────────────────────────────────────────────
   const openEditModal = (product: any) => {
     setEditingId(product.id);
-
-    // Populate the edit form with the selected product's data
-    // Note: Adjust the fields slightly if your editProduct state uses different names
     setEditProduct({
-      name: product.name,
-      category: product.category || '',
-      sellingPrice: product.basePrice?.toString() || '',
-      buyingPrice: product.wholesalePrice?.toString() || '',
-      initialStock: product.qty?.toString() || '0',
-      requires_imei: product.requires_imei || false,
+      name:           product.name,
+      category:       product.category || '',
+      sellingPrice:   product.basePrice?.toString() || '',
+      wholesalePrice: product.wholesalePrice?.toString() || '',
+      initialStock:   product.qty?.toString() || '0',
+      reorderLevel:   product.reorderLevel?.toString() || '10',
     });
-
     setIsEditOpen(true);
   };
 
   const confirmDelete = (id: string, name: string) => {
     setDeletingId(id);
-    setDeletingName(name); // This fixes your TS6133 warning!
-
-    // If your delete confirmation is attached to a specific boolean state, uncomment the line below:
-    // setIsDeleteOpen(true); 
+    setDeletingName(name);
   };
-  // ── ADD ─────────────────────────────────────────────────────────────────────
-  // ── CONCURRENCY-AUDITED: handleAddProduct ────────────────────────────────────
-  // Writes product + inventory row + an inventory_log (synced:0) for the Blackout Guard.
+
+  // ── CRUD ─────────────────────────────────────────────────────────────────────
   const handleAddProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const newId = uuidv4();
-      // 1. Product record (Product type has no synced field)
+      const newId = `prod_${Date.now().toString(36)}`;
       await db.products.add({
         id: newId,
-        sku: `PRD-${newId.substring(0, 6).toUpperCase()}`,
+        sku: `PRD-${Date.now().toString(36).toUpperCase()}`,
         name: newProduct.name,
         category: newProduct.category,
         basePrice: Number(newProduct.sellingPrice),
-        wholesalePrice: Number(newProduct.buyingPrice),
-        wholesaleQtyThreshold: 5,
+        wholesalePrice: Number(newProduct.wholesalePrice),
+        reorderLevel: Number(newProduct.reorderLevel),
         tags: [],
-        requires_imei: newProduct.requires_imei,
         synced: 0,
       });
-      // 2. Inventory cache row
       await db.inventory.add({
-        id: uuidv4(),
+        id: `inv_${Date.now().toString(36)}`,
         productId: newId,
-        shopId: user?.shopId || 'shop_1',
+        shopId: user?.shopId || 'shop_techplanet',
         qty: Number(newProduct.initialStock),
         synced: 0,
       } as any);
-      // 3. Blackout Guard: log the stock-in event for sync
       await db.inventory_logs.add({
-        shopId: user?.shopId || 'shop_1',
+        id: `log_${Date.now().toString(36)}`,
+        shopId: user?.shopId || 'shop_techplanet',
         productId: newId,
         changeType: 'PURCHASE',
         qtyChanged: Number(newProduct.initialStock),
@@ -130,7 +139,7 @@ const InventoryList = () => {
         timestamp: Date.now(),
         synced: 0,
       });
-      loadProducts(); // Immediately re-derive UI from Dexie
+      loadProducts();
       setIsAddOpen(false);
       setNewProduct(emptyForm);
       showToast('Product added successfully!');
@@ -139,33 +148,27 @@ const InventoryList = () => {
       showToast('Failed to add product.', 'error');
     }
   };
-  // ── CONCURRENCY-AUDITED: handleUpdate ────────────────────────────────────────
-  // Updates product + inventory qty + logs the adjustment for sync.
+
   const handleUpdate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingId) return;
     try {
-      const newQty = Number(editProduct.initialStock);
-      // 1. Fetch current qty for delta calculation
+      const newQty   = Number(editProduct.initialStock);
       const invRecord = await db.inventory.where({ productId: editingId }).first();
-      const oldQty = invRecord?.qty ?? 0;
-      const delta = newQty - oldQty;
-      // 2. Update product fields
+      const oldQty   = invRecord?.qty ?? 0;
+      const delta    = newQty - oldQty;
       await db.products.update(editingId, {
         name: editProduct.name,
         category: editProduct.category,
         basePrice: Number(editProduct.sellingPrice),
-        wholesalePrice: Number(editProduct.buyingPrice),
-        requires_imei: editProduct.requires_imei,
+        wholesalePrice: Number(editProduct.wholesalePrice),
+        reorderLevel: Number(editProduct.reorderLevel),
       });
-      // 3. Update inventory qty
-      if (invRecord) {
-        await db.inventory.update(invRecord.id as any, { qty: newQty });
-      }
-      // 4. Blackout Guard: log the adjustment if qty changed
+      if (invRecord) await db.inventory.update(invRecord.id as any, { qty: newQty });
       if (delta !== 0) {
         await db.inventory_logs.add({
-          shopId: user?.shopId || 'shop_1',
+          id: `log_${Date.now().toString(36)}`,
+          shopId: user?.shopId || 'shop_techplanet',
           productId: editingId,
           changeType: 'AUDIT_ADJUSTMENT',
           qtyChanged: delta,
@@ -175,7 +178,7 @@ const InventoryList = () => {
           synced: 0,
         });
       }
-      loadProducts(); // Immediately re-derive UI from Dexie
+      loadProducts();
       setIsEditOpen(false);
       setEditingId(null);
       showToast('Product updated successfully!');
@@ -184,21 +187,15 @@ const InventoryList = () => {
       showToast('Failed to update product.', 'error');
     }
   };
-  // ── CONCURRENCY-AUDITED: handleDelete ────────────────────────────────────────
-  // Deletes product + its inventory row atomically, then refreshes UI.
+
   const handleDelete = async () => {
     if (!deletingId) return;
     try {
-      // 1. Delete product record
       await db.products.delete(deletingId);
-      // 2. Delete matching inventory cache row
       const invRecord = await db.inventory.where({ productId: deletingId }).first();
       if (invRecord) await db.inventory.delete(invRecord.id as any);
-      // 3. Clean up any related inventory logs
-      await db.inventory_logs
-        .where({ productId: deletingId })
-        .delete();
-      loadProducts(); // Immediately re-derive UI from Dexie
+      await db.inventory_logs.where({ productId: deletingId }).delete();
+      loadProducts();
       setDeletingId(null);
       showToast('Product deleted.');
     } catch (err) {
@@ -206,267 +203,312 @@ const InventoryList = () => {
       showToast('Failed to delete product.', 'error');
     }
   };
-  // ── SHARED FORM FIELDS ───────────────────────────────────────────────────────
+
   const renderFormFields = (
     data: typeof emptyForm,
     setter: React.Dispatch<React.SetStateAction<typeof emptyForm>>
   ) => (
-    <>
-      <div className="mb-4">
-        <label className="block text-xs uppercase font-bold text-gray-500 mb-1.5">Product Name</label>
-        <input required type="text"
-          className="w-full p-3 bg-gray-50 text-gray-900 rounded-xl border border-gray-200 focus:border-[#6b21a8] focus:ring-2 focus:ring-[#6b21a8]/20 focus:outline-none transition-all"
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', gridColumn: '1 / -1' }}>
+        <label>Product Name</label>
+        <input required type="text" style={{ height: '48px' }}
           value={data.name} onChange={e => setter(s => ({ ...s, name: e.target.value }))}
-          placeholder="e.g. iPhone 15 Pro" />
+          placeholder="e.g. Maize Bulk 90kg" />
       </div>
-      <div className="mb-4">
-        <label className="block text-xs uppercase font-bold text-gray-500 mb-1.5">Category</label>
-        <input required type="text"
-          className="w-full p-3 bg-gray-50 text-gray-900 rounded-xl border border-gray-200 focus:border-[#6b21a8] focus:ring-2 focus:ring-[#6b21a8]/20 focus:outline-none transition-all"
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+        <label>Category</label>
+        <input required type="text" style={{ height: '48px' }}
           value={data.category} onChange={e => setter(s => ({ ...s, category: e.target.value }))}
-          placeholder="e.g. Phones" />
+          placeholder="e.g. Grains" />
       </div>
-      <div className="grid grid-cols-2 gap-4 mb-4">
-        <div>
-          <label className="block text-xs uppercase font-bold text-gray-500 mb-1.5">Buying Price (KSh)</label>
-          <input required type="number" min="0"
-            className="w-full p-3 bg-gray-50 text-gray-900 rounded-xl border border-gray-200 focus:border-[#6b21a8] focus:ring-2 focus:ring-[#6b21a8]/20 focus:outline-none transition-all"
-            value={data.buyingPrice} onChange={e => setter(s => ({ ...s, buyingPrice: e.target.value }))}
-            placeholder="0.00" />
-        </div>
-        <div>
-          <label className="block text-xs uppercase font-bold text-gray-500 mb-1.5">Selling Price (KSh)</label>
-          <input required type="number" min="0"
-            className="w-full p-3 bg-gray-50 text-gray-900 rounded-xl border border-gray-200 focus:border-[#6b21a8] focus:ring-2 focus:ring-[#6b21a8]/20 focus:outline-none transition-all"
-            value={data.sellingPrice} onChange={e => setter(s => ({ ...s, sellingPrice: e.target.value }))}
-            placeholder="0.00" />
-        </div>
-      </div>
-      <div className="mb-4">
-        <label className="block text-xs uppercase font-bold text-gray-500 mb-1.5">Stock Quantity</label>
-        <input required type="number" min="0"
-          className="w-full p-3 bg-gray-50 text-gray-900 rounded-xl border border-gray-200 focus:border-[#6b21a8] focus:ring-2 focus:ring-[#6b21a8]/20 focus:outline-none transition-all"
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+        <label>Stock Quantity</label>
+        <input required type="number" min="0" style={{ ...mono, height: '48px' }}
           value={data.initialStock} onChange={e => setter(s => ({ ...s, initialStock: e.target.value }))}
           placeholder="0" />
       </div>
-      <div
-        className="mb-5 flex items-center gap-3 bg-gray-50 p-4 rounded-xl border border-gray-200 cursor-pointer hover:bg-gray-100 transition-colors"
-        onClick={() => setter(s => ({ ...s, requires_imei: !s.requires_imei }))}
-      >
-        <input type="checkbox" id="requires_imei" checked={data.requires_imei}
-          onChange={e => setter(s => ({ ...s, requires_imei: e.target.checked }))}
-          className="w-5 h-5 accent-[#6b21a8] cursor-pointer" />
-        <label htmlFor="requires_imei" className="text-sm font-bold text-gray-700 cursor-pointer select-none">
-          Requires IMEI / Serial Tracking
-        </label>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+        <label>Wholesale Price (KSh)</label>
+        <input required type="number" min="0" disabled={!isAdmin}
+          style={{ ...mono, height: '48px', opacity: !isAdmin ? 0.5 : 1, cursor: !isAdmin ? 'not-allowed' : 'auto' }}
+          value={data.wholesalePrice} onChange={e => setter(s => ({ ...s, wholesalePrice: e.target.value }))}
+          placeholder="0.00" />
       </div>
-    </>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+        <label>Selling Price (KSh)</label>
+        <input required type="number" min="0" disabled={!isAdmin}
+          style={{ ...mono, height: '48px', opacity: !isAdmin ? 0.5 : 1, cursor: !isAdmin ? 'not-allowed' : 'auto' }}
+          value={data.sellingPrice} onChange={e => setter(s => ({ ...s, sellingPrice: e.target.value }))}
+          placeholder="0.00" />
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+        <label>Reorder Level</label>
+        <input required type="number" min="0" disabled={!isAdmin}
+          style={{ height: '48px', opacity: !isAdmin ? 0.5 : 1, cursor: !isAdmin ? 'not-allowed' : 'auto' }}
+          value={data.reorderLevel} onChange={e => setter(s => ({ ...s, reorderLevel: e.target.value }))}
+          placeholder="10" />
+      </div>
+    </div>
   );
 
-  // ── RENDER ───────────────────────────────────────────────────────────────────
   return (
-    <div className="animate-fade-in flex flex-col h-full relative">
+    <div style={{ maxWidth: '1400px', margin: '0 auto', paddingBottom: '60px' }}>
 
-      {/* Toast Notification */}
       {toast && (
         <div style={{
           position: 'fixed', top: '1.5rem', right: '1.5rem', zIndex: 9999,
-          background: toast.type === 'success' ? '#10b981' : '#ef4444',
-          color: 'white', padding: '0.75rem 1.5rem', borderRadius: '12px',
-          fontWeight: 'bold', boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
-          animation: 'fadeIn 0.3s ease'
+          background: toast.type === 'success' ? '#16A34A' : '#DC2626',
+          color: '#fff', padding: '10px 20px', borderRadius: '10px',
+          fontWeight: 700, boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
         }}>
-          {toast.msg}
+          {toast.type === 'success' ? '✓ ' : '✕ '}{toast.msg}
         </div>
       )}
 
-      {/* Header */}
-      <div className="flex justify-between items-center mb-6">
-        <div className="flex items-center gap-4">
-          <h1 className="text-3xl font-bold">Local Inventory
-            <span style={{ fontSize: '1rem', fontWeight: 400, marginLeft: '0.5rem', color: 'var(--text-secondary)' }}>
-              — {user?.shopName}
-            </span>
-          </h1>
-          {isAdmin && (
-            <button
-              onClick={() => { setNewProduct(emptyForm); setIsAddOpen(true); }}
-              style={{
-                display: 'flex', alignItems: 'center', gap: '0.4rem',
-                padding: '0.5rem 1.1rem', fontWeight: 700, color: 'white',
-                borderRadius: '10px', background: 'linear-gradient(135deg,#7c3aed,#6b21a8)',
-                border: 'none', cursor: 'pointer', transition: 'all 0.2s',
-                boxShadow: '0 4px 14px rgba(107,33,168,0.4)'
-              }}
-              onMouseOver={e => (e.currentTarget.style.opacity = '0.85')}
-              onMouseOut={e => (e.currentTarget.style.opacity = '1')}
-            >
-              <Plus size={16} /> Add Product
-            </button>
+      <div style={{ marginBottom: '24px' }}>
+        <p style={{ margin: '0 0 2px', fontSize: '0.72rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.10em', color: '#547A95' }}>
+          Node: {user?.shopId} — {user?.shopName}
+        </p>
+        <h1 style={{ margin: 0, color: '#2C3947' }}>Local Inventory</h1>
+      </div>
+
+      <div style={{
+        background: '#FFFFFF',
+        border: '1px solid #E8EDF2',
+        borderTop: '4px solid #C2A56D',
+        borderRadius: '16px',
+        boxShadow: '0 10px 40px -10px rgba(44,57,71,0.10)',
+        overflow: 'hidden',
+      }}>
+
+        <div style={{ padding: '24px 28px', borderBottom: '1px solid #E8EDF2' }}>
+          {lowStockCount > 0 && (
+            <div style={{
+              display: 'inline-flex', alignItems: 'center', gap: '8px',
+              padding: '6px 14px', borderRadius: '20px',
+              background: '#FEE2E2', color: '#B91C1C',
+              fontSize: '0.75rem', fontWeight: 700,
+              marginBottom: '16px',
+            }}>
+              <PackageOpen size={14} />
+              {lowStockCount} {lowStockCount === 1 ? 'item' : 'items'} below reorder threshold — Restock Required
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+            <div style={{ flex: 1, position: 'relative', display: 'flex', alignItems: 'center' }}>
+              <Search size={16} style={{ position: 'absolute', left: '14px', color: '#547A95', pointerEvents: 'none' }} />
+              <input
+                type="text"
+                placeholder="Search SKU or product name…"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                style={{ paddingLeft: '40px', width: '100%', height: '48px' }}
+              />
+            </div>
+
+            {isAdmin && (
+              <button
+                onClick={() => { setNewProduct(emptyForm); setIsAddOpen(true); }}
+                style={{ flexShrink: 0, gap: '8px', height: '48px', padding: '0 24px', borderRadius: '9999px' }}
+              >
+                <Plus size={16} /> Add Product
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div style={{ overflowX: 'auto' }}>
+          {inventoryData.length === 0 ? (
+            <div style={{
+              display: 'flex', flexDirection: 'column', alignItems: 'center',
+              justifyContent: 'center', padding: '64px 24px', gap: '12px', textAlign: 'center'
+            }}>
+              <PackageOpen size={48} style={{ color: '#547A95', opacity: 0.35 }} />
+              <p style={{ margin: 0, fontWeight: 600, color: '#547A95', fontSize: '0.95rem' }}>
+                No products found in local inventory.
+              </p>
+              <p style={{ margin: 0, fontSize: '0.8rem', color: '#94A3B8' }}>
+                {search ? 'Try a different search term.' : 'Add your first product using the button above.'}
+              </p>
+            </div>
+          ) : (
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.875rem' }}>
+              <thead>
+                <tr>
+                  <th style={th}>Product</th>
+                  <th style={th}>SKU</th>
+                  <th style={th}>Category</th>
+                  <th style={{ ...th, textAlign: 'right' }}>Wholesale</th>
+                  <th style={{ ...th, textAlign: 'right' }}>Retail</th>
+                  <th style={{ ...th, textAlign: 'center' }}>In Stock</th>
+                  {isAdmin && <th style={{ ...th, textAlign: 'right' }}>Actions</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {inventoryData.map(item => {
+                  const isLow   = item.qty > 0 && item.qty <= (item.reorderLevel || 10);
+                  const isOut   = item.qty <= 0;
+                  return (
+                    <tr
+                      key={item.id}
+                      style={{ transition: 'background 120ms ease' }}
+                    >
+                      <td style={td}>
+                        <p style={{ margin: 0, fontWeight: 700, color: '#2C3947', fontSize: '0.875rem' }}>{item.name}</p>
+                      </td>
+                      <td style={td}>
+                        <span style={{ ...mono, fontSize: '0.75rem', color: '#547A95' }}>{item.sku}</span>
+                      </td>
+                      <td style={td}>
+                        <span style={{ fontSize: '0.82rem', color: '#547A95' }}>{item.category}</span>
+                      </td>
+                      <td style={{ ...td, textAlign: 'right' }}>
+                        <span style={{ ...mono, fontWeight: 600, color: '#2C3947' }}>
+                          {formatKSh(item.wholesalePrice || 0)}
+                        </span>
+                      </td>
+                      <td style={{ ...td, textAlign: 'right' }}>
+                        <span style={{ ...mono, fontWeight: 700, color: '#2C3947' }}>
+                          {formatKSh(item.basePrice || 0)}
+                        </span>
+                      </td>
+                      <td style={{ ...td, textAlign: 'center' }}>
+                        <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+                          <span style={{
+                            ...mono,
+                            display: 'inline-block',
+                            padding: '3px 12px', borderRadius: '20px',
+                            fontSize: '0.78rem', fontWeight: 700,
+                            background: isOut  ? '#FEE2E2' : isLow ? '#FEF3C7' : '#DCFCE7',
+                            color:      isOut  ? '#B91C1C' : isLow ? '#92400E' : '#15803D',
+                          }}>
+                            {item.qty} units
+                          </span>
+                        </div>
+                      </td>
+                      {isAdmin && (
+                        <td style={{ ...td, textAlign: 'right' }}>
+                          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', alignItems: 'center' }}>
+                            <button
+                              onClick={() => openEditModal(item)}
+                              className="btn-edit-ghost"
+                              style={{
+                                height: '36px', width: '36px', padding: 0,
+                                background: '#F8FAFC', color: '#547A95',
+                                border: '1px solid #E2E8F0', borderRadius: '10px',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                transition: 'all 200ms ease',
+                                cursor: 'pointer'
+                              }}
+                            >
+                              <Pencil size={14} />
+                            </button>
+                            <button
+                              onClick={() => confirmDelete(item.id, item.name)}
+                              style={{
+                                height: '36px', width: '36px', padding: 0,
+                                background: '#FFF1F2', color: '#E11D48',
+                                border: '1px solid #FECDD3', borderRadius: '10px',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                transition: 'all 200ms ease',
+                                cursor: 'pointer'
+                              }}
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                          <style>{`
+                            .btn-edit-ghost:hover {
+                              background: #2C3947 !important;
+                              color: #FFFFFF !important;
+                              border-color: #2C3947 !important;
+                            }
+                          `}</style>
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           )}
         </div>
-        <div className="glass-panel p-2 flex items-center" style={{ width: '300px' }}>
-          <Search size={18} className="mx-2 text-text-muted" />
-          <input
-            type="text"
-            placeholder="Search products..."
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            style={{ border: 'none', background: 'transparent', outline: 'none', color: 'white', width: '100%' }}
-          />
+        <div style={{ padding: '12px 28px', borderTop: '1px solid #E8EDF2', background: '#FAFBFC' }}>
+          <span style={{ fontSize: '0.72rem', color: '#547A95', fontWeight: 600 }}>
+            {inventoryData.length} product{inventoryData.length !== 1 ? 's' : ''} · {user?.shopName}
+          </span>
         </div>
       </div>
 
-      {/* Table */}
-      <div className="glass-panel overflow-auto" style={{ flex: 1 }}>
-        {inventoryData.length === 0 ? (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '300px', color: 'var(--text-secondary)', gap: '1rem' }}>
-            <PackageOpen size={48} style={{ opacity: 0.4 }} />
-            <p style={{ fontSize: '1.1rem', fontWeight: 600 }}>No products found</p>
-          </div>
-        ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
-            <thead>
-              <tr style={{ background: 'var(--surface-color-2)', borderBottom: '1px solid var(--glass-border)' }}>
-                {['Name', 'Category', 'Buying Price', 'Selling Price', 'Stock', 'IMEI'].map(h => (
-                  <th key={h} style={{ padding: '0.9rem 1rem', color: 'var(--text-secondary)', fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700 }}>{h}</th>
-                ))}
-                {isAdmin && <th style={{ padding: '0.9rem 1rem', color: 'var(--text-secondary)', fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700 }}>Actions</th>}
-              </tr>
-            </thead>
-            <tbody>
-              {inventoryData.map((item, idx) => (
-                <tr key={item.id}
-                  style={{
-                    borderBottom: '1px solid rgba(255,255,255,0.05)',
-                    background: idx % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)',
-                    transition: 'background 0.15s'
-                  }}
-                  onMouseOver={e => (e.currentTarget.style.background = 'rgba(107,33,168,0.08)')}
-                  onMouseOut={e => (e.currentTarget.style.background = idx % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.02)')}
-                >
-                  <td style={{ padding: '0.9rem 1rem', fontWeight: 600 }}>{item.name}</td>
-                  <td style={{ padding: '0.9rem 1rem', color: 'var(--text-secondary)' }}>{item.category || '—'}</td>
-                  <td style={{ padding: '0.9rem 1rem' }}>{formatKSh(item.wholesalePrice ?? 0)}</td>
-                  <td style={{ padding: '0.9rem 1rem', color: '#a78bfa', fontWeight: 600 }}>{formatKSh(item.basePrice ?? 0)}</td>
-                  <td style={{ padding: '0.9rem 1rem' }}>
-                    <span style={{
-                      background: item.qty > 10 ? 'rgba(16,185,129,0.15)' : item.qty > 0 ? 'rgba(245,158,11,0.15)' : 'rgba(239,68,68,0.15)',
-                      color: item.qty > 10 ? '#10b981' : item.qty > 0 ? '#f59e0b' : '#ef4444',
-                      padding: '0.3rem 0.8rem', borderRadius: '20px', fontWeight: 700, fontSize: '0.85rem'
-                    }}>
-                      {item.qty} units
-                    </span>
-                  </td>
-                  <td style={{ padding: '0.9rem 1rem' }}>
-                    {item.requires_imei
-                      ? <span style={{ background: 'rgba(245,158,11,0.15)', color: '#f59e0b', padding: '0.25rem 0.6rem', borderRadius: '8px', fontSize: '0.78rem', fontWeight: 700 }}>Yes</span>
-                      : <span style={{ background: 'rgba(16,185,129,0.15)', color: '#10b981', padding: '0.25rem 0.6rem', borderRadius: '8px', fontSize: '0.78rem', fontWeight: 700 }}>No</span>
-                    }
-                  </td>
-
-                  {/* ── The Side-Hustle Guard: Admin-only actions ── */}
-                  {isAdmin && (
-                    <td style={{ padding: '0.9rem 1rem' }}>
-                      <div style={{ display: 'flex', gap: '0.5rem' }}>
-                        <button
-                          onClick={() => openEditModal(item)}
-                          title="Edit product"
-                          style={{
-                            display: 'flex', alignItems: 'center', gap: '0.3rem',
-                            padding: '0.4rem 0.9rem', borderRadius: '8px',
-                            background: 'rgba(59,130,246,0.15)', color: '#60a5fa',
-                            border: '1px solid rgba(59,130,246,0.3)', cursor: 'pointer',
-                            fontWeight: 700, fontSize: '0.82rem', transition: 'all 0.2s'
-                          }}
-                          onMouseOver={e => { e.currentTarget.style.background = 'rgba(59,130,246,0.3)'; }}
-                          onMouseOut={e => { e.currentTarget.style.background = 'rgba(59,130,246,0.15)'; }}
-                        >
-                          <Pencil size={13} /> Edit
-                        </button>
-                        <button
-                          onClick={() => confirmDelete(item.id, item.name)}
-                          title="Delete product"
-                          style={{
-                            display: 'flex', alignItems: 'center', gap: '0.3rem',
-                            padding: '0.4rem 0.9rem', borderRadius: '8px',
-                            background: 'rgba(239,68,68,0.15)', color: '#f87171',
-                            border: '1px solid rgba(239,68,68,0.3)', cursor: 'pointer',
-                            fontWeight: 700, fontSize: '0.82rem', transition: 'all 0.2s'
-                          }}
-                          onMouseOver={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.3)'; }}
-                          onMouseOut={e => { e.currentTarget.style.background = 'rgba(239,68,68,0.15)'; }}
-                        >
-                          <Trash2 size={13} /> Delete
-                        </button>
-                      </div>
-                    </td>
-                  )}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-
-      {/* ── ADD MODAL ─────────────────────────────────────────────────────────── */}
       {isAddOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md animate-fade-in" style={{ maxHeight: '90vh', overflowY: 'auto' }}>
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="text-2xl font-bold" style={{ color: '#6b21a8' }}>Add New Product</h2>
-              <button onClick={() => setIsAddOpen(false)} className="text-gray-400 hover:text-gray-700 transition"><X size={22} /></button>
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(26,43,74,0.45)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 1000, padding: '24px', backdropFilter: 'blur(4px)'
+        }}>
+          <div className="card-raised" style={{ width: '100%', maxWidth: '640px', borderTop: '4px solid #C2A56D', padding: '32px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
+              <h2 style={{ margin: 0 }}>Add New Product</h2>
+              <button onClick={() => setIsAddOpen(false)} style={{ minHeight: '36px', width: '36px', padding: 0, background: 'transparent', color: 'var(--text-muted)', border: '1px solid #E8EDF2', borderRadius: '8px' }}>
+                <X size={16} />
+              </button>
             </div>
             <form onSubmit={handleAddProduct}>
               {renderFormFields(newProduct, setNewProduct)}
-              <div className="flex justify-end gap-3 mt-2">
-                <button type="button" onClick={() => setIsAddOpen(false)} className="px-6 py-3 rounded-xl text-gray-500 hover:text-gray-800 hover:bg-gray-100 font-bold transition-all">Cancel</button>
-                <button type="submit" className="px-6 py-3 font-bold text-white rounded-xl bg-[#6b21a8] hover:opacity-90 transition-all shadow-lg shadow-[#6b21a8]/30">Save Product</button>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '24px' }}>
+                <button type="button" onClick={() => setIsAddOpen(false)} style={{ height: '48px', padding: '0 24px', background: 'transparent', color: 'var(--text-secondary)', border: '1.5px solid #E8EDF2' }}>Cancel</button>
+                <button type="submit" style={{ height: '48px', padding: '0 24px' }}>Save Product</button>
               </div>
             </form>
           </div>
         </div>
       )}
 
-      {/* ── EDIT MODAL ─────────────────────────────────────────────────────────── */}
       {isEditOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md animate-fade-in" style={{ maxHeight: '90vh', overflowY: 'auto' }}>
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="text-2xl font-bold" style={{ color: '#2563eb' }}>Edit Product</h2>
-              <button onClick={() => setIsEditOpen(false)} className="text-gray-400 hover:text-gray-700 transition"><X size={22} /></button>
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(26,43,74,0.45)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 1000, padding: '24px', backdropFilter: 'blur(4px)'
+        }}>
+          <div className="card-raised" style={{ width: '100%', maxWidth: '640px', borderTop: '4px solid #C2A56D', padding: '32px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
+              <h2 style={{ margin: 0 }}>Edit Product</h2>
+              <button onClick={() => setIsEditOpen(false)} style={{ minHeight: '36px', width: '36px', padding: 0, background: 'transparent', color: 'var(--text-muted)', border: '1px solid #E8EDF2', borderRadius: '8px' }}>
+                <X size={16} />
+              </button>
             </div>
             <form onSubmit={handleUpdate}>
               {renderFormFields(editProduct, setEditProduct)}
-              <div className="flex justify-end gap-3 mt-2">
-                <button type="button" onClick={() => setIsEditOpen(false)} className="px-6 py-3 rounded-xl text-gray-500 hover:text-gray-800 hover:bg-gray-100 font-bold transition-all">Cancel</button>
-                <button type="submit" className="px-6 py-3 font-bold text-white rounded-xl bg-blue-600 hover:opacity-90 transition-all shadow-lg shadow-blue-600/30">Save Changes</button>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', marginTop: '24px' }}>
+                <button type="button" onClick={() => setIsEditOpen(false)} style={{ height: '48px', padding: '0 24px', background: 'transparent', color: 'var(--text-secondary)', border: '1.5px solid #E8EDF2' }}>Cancel</button>
+                <button type="submit" style={{ height: '48px', padding: '0 24px' }}>Save Changes</button>
               </div>
             </form>
           </div>
         </div>
       )}
 
-      {/* ── DELETE CONFIRM MODAL ──────────────────────────────────────────────── */}
       {deletingId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-sm animate-fade-in text-center">
-            <div style={{ width: '60px', height: '60px', borderRadius: '50%', background: 'rgba(239,68,68,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 1.25rem' }}>
-              <Trash2 size={28} style={{ color: '#ef4444' }} />
+        <div style={{
+          position: 'fixed', inset: 0, background: 'rgba(26,43,74,0.45)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 1000, padding: '24px', backdropFilter: 'blur(4px)'
+        }}>
+          <div className="card-raised" style={{ width: '100%', maxWidth: '440px', textAlign: 'center', borderTop: '4px solid #EF4444', padding: '32px' }}>
+            <div style={{ width: '52px', height: '52px', borderRadius: '12px', background: '#FEE2E2', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
+              <Trash2 size={22} style={{ color: '#B91C1C' }} />
             </div>
-            <h2 className="text-xl font-bold text-gray-800 mb-2">Delete Product?</h2>
-            <p className="text-gray-500 mb-6">
-              You are about to permanently delete <strong className="text-gray-800">"{deletingName}"</strong>. This cannot be undone.
+            <h2 style={{ margin: '0 0 8px' }}>Delete Product?</h2>
+            <p style={{ margin: '0 0 24px', color: '#547A95', fontSize: '0.875rem' }}>
+              You are about to permanently delete <strong style={{ color: '#2C3947' }}>"{deletingName}"</strong>. This action cannot be undone.
             </p>
-            <div className="flex gap-3 justify-center">
-              <button onClick={() => setDeletingId(null)} className="px-6 py-3 rounded-xl text-gray-500 hover:bg-gray-100 font-bold transition-all">Cancel</button>
-              <button
-                onClick={handleDelete}
-                style={{ padding: '0.75rem 1.75rem', borderRadius: '12px', background: '#ef4444', color: 'white', fontWeight: 700, border: 'none', cursor: 'pointer', transition: 'opacity 0.2s' }}
-                onMouseOver={e => (e.currentTarget.style.opacity = '0.85')}
-                onMouseOut={e => (e.currentTarget.style.opacity = '1')}
-              >
-                Yes, Delete It
+            <div style={{ display: 'flex', gap: '12px' }}>
+              <button onClick={() => setDeletingId(null)} style={{ flex: 1, height: '48px', background: 'transparent', color: 'var(--text-secondary)', border: '1.5px solid #E8EDF2' }}>
+                Cancel
+              </button>
+              <button onClick={handleDelete} style={{ flex: 1, height: '48px', background: '#B91C1C' }}>
+                Yes, Delete
               </button>
             </div>
           </div>

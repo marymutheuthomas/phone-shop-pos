@@ -24,7 +24,7 @@ export function usePurchases(shopId: string) {
   }) => {
     const { productId, qty, unitCostKsh, supplierName, poNumber, recordedBy } = data;
     const now = Date.now();
-    const purchaseId = crypto.randomUUID();
+    const purchaseId = `pur_${Date.now().toString(36)}`;
 
     return await db.transaction('rw', [db.purchases, db.inventory, db.inventory_logs], async () => {
       // 1. Insert Purchase
@@ -52,15 +52,17 @@ export function usePurchases(shopId: string) {
         await db.inventory.update(inv.id, { qty: newBalance });
       } else {
         await db.inventory.add({
-          id: crypto.randomUUID(),
+          id: `inv_${Date.now().toString(36)}_${Math.random().toString(36).substring(2,6)}`,
           shopId,
           productId,
-          qty
+          qty,
+          synced: 0
         });
       }
 
       // 3. Log Movement
       const newLog: InventoryLog = {
+        id: `log_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`,
         shopId,
         productId,
         changeType: 'PURCHASE',

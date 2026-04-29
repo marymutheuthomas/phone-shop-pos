@@ -21,12 +21,11 @@ export const useForensics = () => {
 
         // Hardcoding dictionary resolver for the Dashboard Alert UI
         const mockShops: Record<string, string> = {
-            'shop_1': 'Nairobi Central',
-            'shop_2': 'Mombasa Road',
-            'shop_3': 'Kisumu West',
-            'shop_4': 'Nakuru East',
-            'shop_5': 'Eldoret Hub',
-            'warehouse': 'Main Warehouse'
+            'shop_techplanet': 'Tech Planet Main Shop',
+            'shop_techkys': 'Techkys',
+            'shop_brilliance': 'Brilliance Stationers',
+            'shop_taf1': 'Taf 1',
+            'shop_taf2': 'Taf 2',
         };
 
         const alerts: any[] = [];

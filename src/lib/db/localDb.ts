@@ -6,7 +6,6 @@ export interface Product {
   sku: string;
   name: string;
   basePrice: number; // Integer (KSh)
-  wholesaleQtyThreshold: number;
   wholesalePrice: number; // Integer (KSh)
   tags: string[];
   category: string;

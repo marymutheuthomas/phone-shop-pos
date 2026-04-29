@@ -1,26 +1,61 @@
-import { db, type SaleTransaction, type SaleItem, type InventoryLog } from '../lib/db/schema';
+import { db, type SaleItem, type InventoryLog } from '../lib/db/schema';
 
 export function useCheckout(shopId: string, staffId: string) {
   
   const processCheckout = async (
-    cartItems: { productId: string; qty: number; unitPrice: number; imeis?: string[] }[], 
-    paymentDetails: { method: 'CASH' | 'M-PESA' | 'CARD' | 'DEBT'; mpesaRef?: string; customerId?: string }
+    cartItems: { productId: string; qty: number; unitPrice: number; priceType: 'RETAIL' | 'WHOLESALE' }[], 
+    paymentDetails: { 
+      method: 'CASH' | 'M-PESA' | 'CARD' | 'DEBT'; 
+      mpesaRef?: string; 
+      customerId?: string;
+      customerName?: string;
+      customerPhone?: string;
+      priceType: 'RETAIL' | 'WHOLESALE';
+    }
   ) => {
     const now = Date.now();
-    const saleId = crypto.randomUUID();
+    const saleId = `txn_${Date.now().toString(36)}`;
     const totalKsh = cartItems.reduce((acc, item) => acc + (item.unitPrice * item.qty), 0);
 
-    return await db.transaction('rw', [db.sale_transactions, db.sale_items, db.inventory, db.inventory_logs, db.active_cart, db.product_items], async () => {
+    // ── Pre-flight stock validation ──────────────────────────────────────────
+    for (const item of cartItems) {
+      const inv = await db.inventory.where({ shopId, productId: item.productId }).first();
+      const available = inv?.qty ?? 0;
+      if (available <= 0) {
+        const product = await db.products.get(item.productId);
+        throw new Error(`"${product?.name ?? item.productId}" is out of stock and cannot be sold.`);
+      }
+      if (item.qty > available) {
+        const product = await db.products.get(item.productId);
+        throw new Error(`Insufficient stock for "${product?.name ?? item.productId}". Requested: ${item.qty}, Available: ${available}.`);
+      }
+    }
+
+    let totalWholesaleCost = 0;
+    for (const item of cartItems) {
+      const product = await db.products.get(item.productId);
+      if (product) {
+        totalWholesaleCost += (product.wholesalePrice || 0) * item.qty;
+      }
+    }
+
+    return await db.transaction('rw', [db.sale_transactions, db.sale_items, db.inventory, db.inventory_logs, db.active_cart, db.products], async () => {
       
       // Step A: The Receipt (Header)
-      const txn: SaleTransaction = {
+      const txn: any = {
         id: saleId,
         shopId,
         staffId,
         totalKsh,
+        wholesale_cost: totalWholesaleCost,
         discountKsh: 0,
         paymentMethod: paymentDetails.method,
         mpesaRef: paymentDetails.mpesaRef,
+        customerId: paymentDetails.customerId,
+        customerName: paymentDetails.customerName,
+        customerPhone: paymentDetails.customerPhone,
+        priceType: paymentDetails.priceType,
+        status: paymentDetails.method === 'DEBT' ? 'PENDING' : 'COMPLETED',
         timestamp: now,
         synced: 0
       };
@@ -34,12 +69,14 @@ export function useCheckout(shopId: string, staffId: string) {
         const newQty = currentQty - item.qty;
 
         // Step B: Line Items
+        const itemIndex = cartItems.indexOf(item);
         const saleItem: SaleItem = {
-          id: crypto.randomUUID(),
+          id: `si_${saleId}_${itemIndex}_${Math.random().toString(36).substring(2,5)}`,
           saleId,
           productId: item.productId,
           qty: item.qty,
           salePriceKsh: item.unitPrice,
+          priceType: item.priceType,
         };
         await db.sale_items.add(saleItem);
 
@@ -49,32 +86,17 @@ export function useCheckout(shopId: string, staffId: string) {
         } else {
           // If no inventory record exists, create one with negative stock
           await db.inventory.add({
-            id: crypto.randomUUID(),
+            id: `inv_${Date.now().toString(36)}`,
             shopId,
             productId: item.productId,
             qty: -item.qty,
+            synced: 0
           } as any);
-        }
-
-        // Handle IMEI tracking for serialized products
-        if (item.imeis && item.imeis.length > 0) {
-          for (const serial of item.imeis) {
-            const imeiRecord = await db.product_items.where({ imei_serial: serial }).first();
-            if (imeiRecord && imeiRecord.id) {
-               await db.product_items.update(imeiRecord.id, { status: 'SOLD' });
-            } else {
-               await db.product_items.add({
-                  productId: item.productId,
-                  imei_serial: serial,
-                  shopId,
-                  status: 'SOLD'
-               });
-            }
-          }
         }
 
         // Step D: Inventory Log (Audit Trail)
         const log: InventoryLog = {
+          id: `log_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`,
           shopId,
           productId: item.productId,
           changeType: 'SALE',

@@ -4,158 +4,187 @@ import { useLiveQuery } from '../../hooks/useLiveQuery';
 import { useAuth } from '../../context/AuthContext';
 import { useInventory } from '../../hooks/useInventory';
 import { formatKSh } from '../../utils/formatters';
-import { Package, Truck } from 'lucide-react';
+import { Package, Truck, ArrowRight, CheckCircle, Clock, X } from 'lucide-react';
+
+const mono: React.CSSProperties = {
+  fontFamily: 'ui-monospace, "Cascadia Code", monospace',
+  fontVariantNumeric: 'tabular-nums',
+};
 
 const TransferPortal = () => {
   const { user } = useAuth();
   const isAdmin = user?.role === 'ADMIN';
-  const { sendStock, receiveStock } = useInventory();
+  const { handleOutgoingTransfer, handleIncomingTransfer } = useInventory();
 
-  const [selectedShop, setSelectedShop] = useState('shop_2'); // Defaults to Mombasa Road
+  const [selectedShop,    setSelectedShop]    = useState('shop_techkys');
   const [selectedProduct, setSelectedProduct] = useState('');
-  const [transferQty, setTransferQty] = useState(1);
-  const [confirmQtys, setConfirmQtys] = useState<Record<string, number>>({});
+  const [transferQty,     setTransferQty]     = useState(1);
+  const [confirmQtys,     setConfirmQtys]     = useState<Record<string, number>>({});
 
-  // Queries
-  const products = useLiveQuery(() => db.products.toArray(), []) || [];
-  const pendingTransfers = useLiveQuery(() => 
+  const products        = useLiveQuery(() => db.products.toArray(), []) || [];
+  const pendingTransfers = useLiveQuery(() =>
     db.transfers.where('status').equals('PENDING').toArray(), []
   ) || [];
 
   const handleDispatch = async () => {
     if (!selectedProduct || transferQty < 1) return;
     try {
-      await sendStock(user!.id, 'warehouse', selectedShop, selectedProduct, transferQty);
-      alert("Transfer Dispatched Successfully. Awaiting Shop Confirmation.");
+      await handleOutgoingTransfer(user!.id, user!.shopId, selectedShop, selectedProduct, transferQty);
+      alert('Stock sent! Awaiting shop confirmation.');
       setTransferQty(1);
-    } catch (err: any) {
-      alert(err.message);
-    }
+    } catch (err: any) { alert(err.message); }
   };
 
   const handleReceive = async (transferId: string) => {
-    const verifiedInput = confirmQtys[transferId] || 0;
-    try {
-      await receiveStock(transferId, user!.id, user!.shopId, verifiedInput);
-      alert("Transfer Confirmed. Products are now AVAILABLE in your local inventory.");
-    } catch (err: any) {
-      alert(err.message);
+    const verified = confirmQtys[transferId] || 0;
+    const transfer = pendingTransfers.find(t => t.id === transferId);
+    if (verified !== transfer?.qty) {
+      alert(`Count mismatch: you entered ${verified} but the sender says ${transfer?.qty ?? 0}. Please double-check.`);
+      return;
     }
+    try {
+      await handleIncomingTransfer(transferId, user!.id);
+      alert('Stock received and added to inventory.');
+    } catch (err: any) { alert(err.message); }
   };
 
+  const visibleTransfers = pendingTransfers.filter(t => isAdmin ? true : t.toShopId === user?.shopId);
+
   return (
-    <div className="animate-fade-in flex gap-6 h-full">
-      {/* Sender Panel / Dashboard */}
-      {isAdmin && (
-        <div className="glass-panel p-6" style={{ width: '400px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.5rem', color: 'var(--primary-color)' }}>
-             <Truck />
-             <h2 className="text-xl font-bold text-text-primary">Dispatch Stock</h2>
-          </div>
-          
-          <div className="flex flex-col gap-4">
-            <div>
-              <label className="text-text-secondary text-sm block mb-1">Destination Shop</label>
-              <select className="w-full p-3 rounded-lg text-gray-900 bg-white border border-gray-300" value={selectedShop} onChange={e => setSelectedShop(e.target.value)}>
-                <option value="shop_1">Nairobi Central</option>
-                <option value="shop_2">Mombasa Road</option>
-                <option value="shop_3">Kisumu West</option>
-                <option value="shop_4">Nakuru East</option>
-                <option value="shop_5">Eldoret Hub</option>
-              </select>
-            </div>
+    <div style={{ maxWidth: '1400px', margin: '0 auto', paddingBottom: '60px', display: 'flex', flexDirection: 'column', gap: '32px' }}>
 
-            <div>
-              <label className="text-text-secondary text-sm block mb-1">Select Product</label>
-              <select className="w-full p-3 rounded-lg text-gray-900 bg-white border border-gray-300" value={selectedProduct} onChange={e => setSelectedProduct(e.target.value)}>
-                <option value="">-- Choose Product --</option>
-                {products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
-            </div>
-
-            <div>
-              <label className="text-text-secondary text-sm block mb-1">Quantity</label>
-              <input type="number" min="1" value={transferQty} onChange={e => setTransferQty(parseInt(e.target.value))} className="w-full p-3 rounded-lg text-gray-900 bg-white border border-gray-300" />
-            </div>
-
-            <button onClick={handleDispatch} className="btn btn-primary mt-4 py-3 font-bold" style={{ width: '100%' }}>Send Stock Transfer</button>
-          </div>
+      {/* ── Header ──────────────────────────────────────────────────────── */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+        <div style={{
+          width: '52px', height: '52px', borderRadius: '14px',
+          background: 'var(--navy)', color: '#fff',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0
+        }}>
+          <ArrowRight size={22} />
         </div>
-      )}
+        <div>
+          <h1 style={{ marginBottom: '2px' }}>Move Stock</h1>
+          <p style={{ fontSize: '0.82rem', margin: 0 }}>Send and receive items between different shop locations</p>
+        </div>
+      </div>
 
-      {/* Receiver Panel / Pending Transfers */}
-      <div className="glass-panel p-6 flex-1 h-full overflow-y-auto">
-        <h2 className="text-xl font-bold mb-4" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          <Package /> Incoming Shipments
-        </h2>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: '32px', alignItems: 'start' }}>
 
-        <div className="flex flex-col gap-4">
-          {pendingTransfers
-             .filter(t => isAdmin ? true : t.toShopId === user?.shopId)
-             .map(transfer => {
-               
-               // Compute Value computed purely in integer math
-               let transitValue = 0;
-               transfer.items.forEach(i => {
-                 const p = products.find(prod => prod.id === i.productId);
-                 if (p) transitValue += (p.basePrice * i.qty);
-               });
-               
-               return (
-            <div key={transfer.id} className="p-4" style={{ border: '1px solid var(--glass-border)', borderRadius: '12px', background: 'rgba(255,255,255,0.02)' }}>
-              <div className="flex justify-between items-center mb-3 pb-3" style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-                <div>
-                  <span className="text-text-secondary text-sm">Batch ID:</span> <span className="font-mono">{transfer.id.split('-')[0]}</span>
-                </div>
-                <div style={{ background: 'rgba(245, 158, 11, 0.1)', color: 'var(--warning-color)', padding: '0.25rem 0.5rem', borderRadius: '4px', fontSize: '0.75rem', fontWeight: 'bold' }}>
-                  PENDING RECEIPT
-                </div>
+        {/* ── Dispatch Form (Admin only) ───────────────────────────────── */}
+        {isAdmin && (
+          <div className="card" style={{ borderTop: '4px solid var(--gold)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '24px' }}>
+              <Truck size={18} style={{ color: 'var(--gold)' }} />
+              <h3 style={{ margin: 0 }}>Send Stock to Another Shop</h3>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <label>Send To (Destination Shop)</label>
+                <select style={{ height: '48px' }} value={selectedShop} onChange={e => setSelectedShop(e.target.value)}>
+                  <option value="shop_techplanet">Tech Planet Main Shop</option>
+                  <option value="shop_techkys">Techkys</option>
+                  <option value="shop_brilliance">Brilliance Stationers</option>
+                  <option value="shop_taf1">Taf 1</option>
+                  <option value="shop_taf2">Taf 2</option>
+                </select>
               </div>
 
-              {transfer.items.map((item, idx) => {
-                const p = products.find(prod => prod.id === item.productId);
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <label>Select Item</label>
+                <select style={{ height: '48px' }} value={selectedProduct} onChange={e => setSelectedProduct(e.target.value)}>
+                  <option value="">-- Choose Product --</option>
+                  {products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <label>How Many? (Quantity)</label>
+                <input
+                  type="number" min="1"
+                  value={transferQty}
+                  onChange={e => setTransferQty(parseInt(e.target.value))}
+                  style={{ height: '48px', ...mono }}
+                />
+              </div>
+
+              <button onClick={handleDispatch} style={{ width: '100%', height: '48px', marginTop: '8px' }}>
+                Send Stock Now
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── Incoming Shipments ──────────────────────────────────────── */}
+        <div className="card" style={{ padding: 0, overflow: 'hidden', borderTop: '4px solid var(--navy)' }}>
+          <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--surface-border)', display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <Package size={18} style={{ color: 'var(--gold)' }} />
+            <h3 style={{ margin: 0 }}>Stock Coming In</h3>
+            <span style={{ marginLeft: 'auto', fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)' }}>
+              {visibleTransfers.length} pending
+            </span>
+          </div>
+
+          <div style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            {visibleTransfers.length === 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '48px 0', gap: '12px' }}>
+                <CheckCircle size={48} style={{ color: '#22C55E', opacity: 0.3 }} />
+                <p style={{ margin: 0, color: 'var(--text-muted)', fontWeight: 600 }}>No incoming stock right now.</p>
+              </div>
+            ) : (
+              visibleTransfers.map(transfer => {
+                const p = products.find(prod => prod.id === transfer.productId);
                 return (
-                  <div key={idx} className="flex justify-between items-center my-2">
-                    <div style={{ fontWeight: '500' }}>{p?.name || 'Unknown Product'}</div>
-                    <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
-                      <span className="text-sm text-text-muted">Target Qty: {item.qty} Products</span>
+                  <div key={transfer.id} style={{
+                    padding: '20px',
+                    border: '1px solid var(--surface-border)',
+                    borderRadius: '12px',
+                    background: '#F8FAFC',
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '14px' }}>
+                      <div>
+                        <h4 style={{ margin: '0 0 4px', color: 'var(--navy)', fontSize: '0.95rem' }}>{p?.name || 'Unknown Product'}</h4>
+                        <p style={{ margin: 0, fontSize: '0.72rem', color: '#547A95' }}>From: <strong>{transfer.fromShopId}</strong></p>
+                      </div>
+                      <div style={{ textAlign: 'right' }}>
+                        <div style={{ ...mono, fontSize: '1.4rem', fontWeight: 800, color: 'var(--navy)', lineHeight: 1 }}>
+                          {transfer.qty}
+                        </div>
+                        <span style={{ fontSize: '0.65rem', fontWeight: 700, color: '#547A95', textTransform: 'uppercase' }}>Units</span>
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', paddingTop: '16px', borderTop: '1px solid #E8EDF2' }}>
+                      {!isAdmin && (
+                        <>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                            <label style={{ fontSize: '0.75rem', color: '#547A95' }}>Confirm Received Count</label>
+                            <div style={{ display: 'flex', gap: '8px' }}>
+                              <input
+                                type="number"
+                                placeholder="Count…"
+                                value={confirmQtys[transfer.id] || ''}
+                                onChange={e => setConfirmQtys({ ...confirmQtys, [transfer.id]: parseInt(e.target.value) })}
+                                style={{ flex: 1, height: '44px', ...mono }}
+                              />
+                              <button onClick={() => handleReceive(transfer.id)} style={{ height: '44px', padding: '0 16px', fontSize: '0.8rem' }}>
+                                Confirm Received
+                              </button>
+                            </div>
+                          </div>
+                        </>
+                      )}
+                      {isAdmin && (
+                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#92400E', fontSize: '0.75rem', fontWeight: 600 }}>
+                           <Clock size={14} /> Waiting for {transfer.toShopId} to confirm.
+                         </div>
+                      )}
                     </div>
                   </div>
-                )
-              })}
-
-              <div className="mt-4 pt-3 flex flex-col gap-3" style={{ borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-                <div className="flex justify-between items-center">
-                   <div className="text-xs text-text-muted">
-                    Total Value of Goods: <span className="font-bold text-white ml-2">{formatKSh(transitValue)}</span> <br/>
-                    Target Destination: Shop ID {transfer.toShopId.charAt(transfer.toShopId.length-1)}
-                   </div>
-                </div>
-                
-                {/* Validation Rule Flow */}
-                {!isAdmin && (
-                  <div className="flex justify-end gap-3 mt-2">
-                    <input 
-                      type="number" 
-                      placeholder="Confirm Qty..." 
-                      value={confirmQtys[transfer.id] || ''}
-                      onChange={e => setConfirmQtys({...confirmQtys, [transfer.id]: parseInt(e.target.value)})}
-                      className="p-2 rounded text-gray-900 bg-white border border-gray-400 w-[120px]" 
-                    />
-                    <button onClick={() => handleReceive(transfer.id)} className="btn btn-primary" style={{ background: 'var(--primary-color)', border: 'none', boxShadow: 'none' }}>
-                      Receive & Verify
-                    </button>
-                  </div>
-                )}
-              </div>
-            </div>
-          )})}
-          
-          {pendingTransfers.filter(t => isAdmin ? true : t.toShopId === user?.shopId).length === 0 && (
-             <div className="text-center text-text-muted mt-8 p-8" style={{ border: '2px dashed var(--glass-border)', borderRadius: '12px' }}>
-               No pending incoming shipments.
-             </div>
-          )}
+                );
+              })
+            )}
+          </div>
         </div>
       </div>
     </div>

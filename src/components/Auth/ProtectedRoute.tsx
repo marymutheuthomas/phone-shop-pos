@@ -1,10 +1,11 @@
-import { ReactNode } from 'react';
+import type { ReactNode } from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
+import type { Role } from '../../context/AuthContext';
 
 interface ProtectedRouteProps {
   children: ReactNode;
-  allowedRoles: ('STAFF' | 'MANAGER' | 'ADMIN')[];
+  allowedRoles: Role[];
 }
 
 export const ProtectedRoute = ({ children, allowedRoles }: ProtectedRouteProps) => {

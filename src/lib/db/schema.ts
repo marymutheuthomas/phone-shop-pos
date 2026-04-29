@@ -6,20 +6,11 @@ export interface Product {
   sku: string;
   name: string;
   basePrice: number;
-  wholesaleQtyThreshold: number;
   wholesalePrice: number;
+  reorderLevel: number;
   tags: string[];
   category: string;
-  requires_imei?: boolean;
   synced?: number;
-}
-
-export interface ProductItem {
-  id?: number | string;
-  productId: string;
-  imei_serial: string;
-  shopId: string;
-  status: 'IN_STOCK' | 'SOLD';
 }
 
 export interface InventoryCache {
@@ -35,9 +26,24 @@ export interface SaleTransaction {
   shopId: string;
   staffId: string;
   totalKsh: number;
+  wholesale_cost?: number; // Added for profit calculation
   discountKsh: number;
-  paymentMethod: 'CASH' | 'M-PESA' | 'CARD' | 'DEBT';
+  paymentMethod: 'CASH' | 'M-PESA' | 'CARD' | 'DEBT' | 'DEBT_SETTLEMENT';
   mpesaRef?: string;
+  customerId?: string;
+  customerName?: string;
+  customerPhone?: string;
+  priceType: 'RETAIL' | 'WHOLESALE';
+  status: 'COMPLETED' | 'PENDING' | 'REJECTED';
+  timestamp: number;
+  synced: 0 | 1;
+}
+
+export interface DebtPayment {
+  id: string;
+  customerId: string;
+  amount: number;
+  method: 'CASH' | 'M-PESA';
   timestamp: number;
   synced: 0 | 1;
 }
@@ -48,16 +54,18 @@ export interface SaleItem {
   productId: string;
   qty: number;
   salePriceKsh: number;
+  priceType: 'RETAIL' | 'WHOLESALE';
 }
 
 export interface ActiveCart {
-  id?: number;
+  id: string;
   productId: string;
   qty: number;
+  priceType: 'RETAIL' | 'WHOLESALE';
 }
 
 export interface SalesQueueTask {
-  id?: number;
+  id: string;
   payload: any;
   timestamp: number;
   status: 'pending' | 'syncing' | 'failed';
@@ -75,7 +83,7 @@ export interface Transfer {
 }
 
 export interface AuditRecord {
-  id?: number;
+  id: string;
   shopId: string;
   productId: string;
   expectedQty: number;
@@ -83,25 +91,34 @@ export interface AuditRecord {
   discrepancy: number;
   approverId: string;
   timestamp: number;
+  synced: 0 | 1;
 }
 
 export interface Employee {
-  id?: number;
+  id: string;
   username: string;
   name: string;
-  role: 'STAFF' | 'MANAGER' | 'ADMIN';
+  role: 'EMPLOYEE' | 'ADMIN' | 'MANAGER';
   shopId: string;
   shopName: string;
   passcode: string;
 }
 
+export interface Shop {
+  id: string;
+  name: string;
+  synced: 0 | 1;
+}
+
 export interface Customer {
-  id: string;        // UUID
+  id: string;
   name: string;
   phone?: string;
   email?: string;
   shopId: string;
-  synced: 0 | 1;   // Blackout Guard flag
+  isDebtEligible: boolean;
+  totalBalance: number;
+  synced: 0 | 1;
 }
 
 export interface Purchase {
@@ -119,10 +136,10 @@ export interface Purchase {
 }
 
 export interface InventoryLog {
-  id?: number;
+  id: string;
   shopId: string;
   productId: string;
-  changeType: 'PURCHASE' | 'SALE' | 'TRANSFER_IN' | 'TRANSFER_OUT' | 'AUDIT_ADJUSTMENT';
+  changeType: 'PURCHASE' | 'SALE' | 'TRANSFER_IN' | 'TRANSFER_OUT' | 'AUDIT_ADJUSTMENT' | 'REVERSAL';
   qtyChanged: number;
   newBalance: number;
   staffId: string;
@@ -131,38 +148,41 @@ export interface InventoryLog {
 }
 
 export class OmniShopDatabase extends Dexie {
+  shops!: Table<Shop, string>;
   products!: Table<Product, string>;
-  product_items!: Table<ProductItem, string | number>;
   inventory!: Table<InventoryCache, string>;
-  active_cart!: Table<ActiveCart, number>;
-  sales_queue!: Table<SalesQueueTask, number>;
+  active_cart!: Table<ActiveCart, string>;
+  sales_queue!: Table<SalesQueueTask, string>;
   transfers!: Table<Transfer, string>;
-  audits!: Table<AuditRecord, number>;
-  employees!: Table<Employee, number>;
+  audits!: Table<AuditRecord, string>;
+  employees!: Table<Employee, string>;
   purchases!: Table<Purchase, string>;
-  inventory_logs!: Table<InventoryLog, number>;
+  inventory_logs!: Table<InventoryLog, string>;
   sale_transactions!: Table<SaleTransaction, string>;
   sale_items!: Table<SaleItem, string>;
   customers!: Table<Customer, string>;
+  debt_payments!: Table<DebtPayment, string>;
 
   constructor() {
     super('OmniShopDB');
-    this.version(10).stores({
+    this.version(17).stores({
+      shops: 'id, name, synced',
       products: 'id, sku, category, *tags, synced',
-      product_items: '++id, productId, imei_serial, shopId, status',
-      inventory_logs: '++id, shopId, productId, changeType, timestamp, synced, [shopId+synced]',
-      active_cart: '++id, productId',
-      sales_queue: '++id, status',
+      inventory_logs: 'id, shopId, productId, changeType, timestamp, synced, [shopId+synced]',
+      active_cart: 'id, productId',
+      sales_queue: 'id, status',
       transfers: 'id, productId, fromShopId, toShopId, status, synced',
-      audits: '++id, shopId, productId, timestamp',
-      employees: '++id, username, role',
+      audits: 'id, shopId, productId, timestamp',
+      employees: 'id, username, role',
       purchases: 'id, shopId, productId, synced, timestamp',
-      inventory: '++id, shopId, productId, synced',
-      sale_transactions: 'id, shopId, staffId, synced, timestamp',
+      inventory: 'id, shopId, productId, synced, [shopId+productId]',
+      sale_transactions: 'id, shopId, staffId, status, synced, timestamp',
       sale_items: 'id, saleId, productId',
-      customers: 'id, shopId, synced, phone'
+      customers: 'id, shopId, synced, phone, isDebtEligible',
+      debt_payments: 'id, customerId, timestamp, synced'
     });
   }
 }
 
 export const db = new OmniShopDatabase();
+

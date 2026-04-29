@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { db } from '../../lib/db/schema';
 import { useLiveQuery } from '../../hooks/useLiveQuery';
-import { 
-  Trash2, Plus, Minus, CreditCard, UserPlus, Search, 
-  ShoppingCart, CheckCircle2, AlertCircle, Info 
+import {
+  Trash2, Plus, Minus, CreditCard,
+  ShoppingCart, AlertCircle, CheckCircle2,
+  Search, X
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useCheckout } from '../../hooks/useCheckout';
@@ -11,34 +12,40 @@ import { formatKSh } from '../../utils/formatters';
 
 type PaymentType = 'Cash' | 'M-Pesa' | 'Debt';
 
+const mono: React.CSSProperties = {
+  fontFamily: 'ui-monospace, "Cascadia Code", monospace',
+  fontVariantNumeric: 'tabular-nums',
+};
+
 const Cart = () => {
-  const { user } = useAuth();
-  const { processCheckout } = useCheckout(user?.shopId || 'warehouse', user?.name || 'Unknown');
+  const { user }        = useAuth();
+  const { processCheckout } = useCheckout(user?.shopId || 'shop_techplanet', user?.name || 'Unknown');
 
-  // ── State ────────────────────────────────────────────────────────────────
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [checkoutModalOpen, setCheckoutModalOpen] = useState(false);
-  const [paymentType, setPaymentType] = useState<PaymentType>('Cash');
-  const [mpesaCode, setMpesaCode] = useState('');
-  
-  const [customerSearch, setCustomerSearch] = useState('');
-  const [selectedCustomerId, setSelectedCustomerId] = useState(''); 
-  const [isNewCustomer, setIsNewCustomer] = useState(false);
+  // ── State ───────────────────────────────────────────────────────────────────
+  const [isProcessing,       setIsProcessing]       = useState(false);
+  const [checkoutModalOpen,  setCheckoutModalOpen]  = useState(false);
+  const [paymentType,        setPaymentType]        = useState<PaymentType>('Cash');
+  const [mpesaCode,          setMpesaCode]          = useState('');
+  const [customerSearch,     setCustomerSearch]     = useState('');
+  const [customerPhone,      setCustomerPhone]      = useState('');
+  const [selectedCustomerId, setSelectedCustomerId] = useState('');
+  const [isNewCustomer,      setIsNewCustomer]      = useState(false);
+  const [globalPriceMode,    setGlobalPriceMode]    = useState<'RETAIL' | 'WHOLESALE'>('RETAIL');
 
-  const [imeiInputs, setImeiInputs] = useState<Record<number, string[]>>({});
-
-  // ── Data Query ───────────────────────────────────────────────────────────
-  const { cartItems, customers } = useLiveQuery(async () => {
-    const items = await db.active_cart.toArray();
+  // ── Live Data ────────────────────────────────────────────────────────────────
+  const { cartItems, matchingCustomers } = useLiveQuery(async () => {
+    const items      = await db.active_cart.toArray();
     const productIds = items.map(i => i.productId);
-    const products = await db.products.where('id').anyOf(productIds).toArray();
-    
-    let matchedCustomers: any[] = [];
-    if (customerSearch.length > 1) {
-      matchedCustomers = await db.customers
-        .filter(c => c.name.toLowerCase().includes(customerSearch.toLowerCase()))
-        .limit(5)
-        .toArray();
+    const products   = await db.products.where('id').anyOf(productIds).toArray();
+
+    let customers: any[] = await db.customers
+      .filter(c => c.isDebtEligible || (c.totalBalance && c.totalBalance > 0))
+      .toArray();
+    if (customerSearch.length > 0) {
+      customers = customers.filter(c =>
+        c.name.toLowerCase().includes(customerSearch.toLowerCase()) ||
+        (c.phone && c.phone.includes(customerSearch))
+      );
     }
 
     return {
@@ -46,348 +53,453 @@ const Cart = () => {
         cartItem,
         product: products.find(p => p.id === cartItem.productId),
       })),
-      customers: matchedCustomers
+      matchingCustomers: customers.sort((a, b) => (b.totalBalance || 0) - (a.totalBalance || 0))
     };
-  }, [customerSearch]) || { cartItems: [], customers: [] };
+  }, [customerSearch]) || { cartItems: [], matchingCustomers: [] };
 
   const cartItemsResult = cartItems;
 
-  const updateQty = async (id: number, delta: number) => {
+  // ── Mutations ────────────────────────────────────────────────────────────────
+  const updateQty = async (id: string, delta: number) => {
     const item = await db.active_cart.get(id);
     if (!item) return;
     const newQty = item.qty + delta;
-    if (newQty <= 0) {
-      await db.active_cart.delete(id);
-      setImeiInputs(prev => { const ni = { ...prev }; delete ni[id]; return ni; });
-    } else {
-      await db.active_cart.update(id, { qty: newQty });
-      setImeiInputs(prev => {
-        const ni = { ...prev };
-        if (ni[id] && ni[id].length > newQty) ni[id] = ni[id].slice(0, newQty);
-        return ni;
-      });
+    if (newQty <= 0) await db.active_cart.delete(id);
+    else             await db.active_cart.update(id, { qty: newQty });
+  };
+
+  const setGlobalMode = async (mode: 'RETAIL' | 'WHOLESALE') => {
+    setGlobalPriceMode(mode);
+    const items = await db.active_cart.toArray();
+    for (const item of items) {
+      await db.active_cart.update(item.id!, { priceType: mode });
     }
   };
 
-  const removeCartItem = async (id: number) => {
-    await db.active_cart.delete(id);
-    setImeiInputs(prev => { const ni = { ...prev }; delete ni[id]; return ni; });
+  const togglePriceType = async (id: string, current: 'RETAIL' | 'WHOLESALE') => {
+    await db.active_cart.update(id, { priceType: current === 'RETAIL' ? 'WHOLESALE' : 'RETAIL' });
   };
 
+  const removeCartItem = async (id: string) => {
+    await db.active_cart.delete(id);
+  };
+
+  // ── Totals ───────────────────────────────────────────────────────────────────
   const total = cartItemsResult.reduce(({ subtotal }, { cartItem, product }) => {
     if (!product) return { subtotal };
-    const isWholesale = cartItem.qty >= product.wholesaleQtyThreshold;
-    const unitPrice = isWholesale ? product.wholesalePrice : product.basePrice;
+    const unitPrice = cartItem.priceType === 'WHOLESALE' ? product.wholesalePrice : product.basePrice;
     return { subtotal: subtotal + unitPrice * cartItem.qty };
   }, { subtotal: 0 }).subtotal;
 
-  const requiresCustomer = paymentType === 'Debt';
+  const hasWholesaleAny  = cartItemsResult.some(i => i.cartItem.priceType === 'WHOLESALE') || globalPriceMode === 'WHOLESALE';
+  const requiresCustomer = paymentType === 'Debt' || hasWholesaleAny;
+  const canCheckout      = !isProcessing && (
+    (paymentType === 'Cash' && !hasWholesaleAny) ||
+    (paymentType === 'M-Pesa' && mpesaCode.trim().length >= 4 && !hasWholesaleAny) ||
+    (requiresCustomer && (selectedCustomerId || (isNewCustomer && customerSearch.trim() && customerPhone.trim())))
+  );
 
+  // ── Checkout handler ─────────────────────────────────────────────────────────
   const handleCheckout = async () => {
-    if (paymentType === 'M-Pesa' && !mpesaCode) {
-      alert('Please enter the M-Pesa Reference Code.');
-      return;
-    }
-
+    if (paymentType === 'M-Pesa' && !mpesaCode) { alert('Enter the M-Pesa Reference Code.'); return; }
     if (requiresCustomer && !selectedCustomerId && !isNewCustomer) {
-      alert('You MUST select or create a customer for Debt transactions.');
-      return;
+      alert('Select or create a customer for Debt/Wholesale transactions.'); return;
     }
-
-    let missingImei = false;
-    cartItemsResult.forEach(({ cartItem, product }) => {
-      if (product?.requires_imei) {
-        const provided = imeiInputs[cartItem.id!] || [];
-        if (provided.filter(i => i && i.trim() !== '').length < cartItem.qty) {
-          missingImei = true;
-        }
-      }
-    });
-    if (missingImei) {
-      alert('All serial numbers (IMEIs) must be provided.');
-      return;
+    if (requiresCustomer && selectedCustomerId) {
+      const cust = await db.customers.get(selectedCustomerId);
+      if (cust && !cust.isDebtEligible && paymentType === 'Debt') { alert('Customer is NOT eligible for credit.'); return; }
     }
 
     setIsProcessing(true);
     try {
       let finalCustomerId = selectedCustomerId;
-
       if (requiresCustomer && isNewCustomer && customerSearch.trim()) {
         const newUid = crypto.randomUUID();
         await db.customers.add({
-          id: newUid,
-          name: customerSearch.trim(),
-          shopId: user?.shopId || 'warehouse',
-          synced: 0
+          id: newUid, name: customerSearch.trim(), phone: customerPhone.trim(),
+          shopId: user?.shopId || 'shop_techplanet', isDebtEligible: false, totalBalance: 0, synced: 0
         });
         finalCustomerId = newUid;
       }
 
       const cartFormatted = cartItemsResult.map(({ cartItem, product }) => {
-        const isWholesale = cartItem.qty >= product!.wholesaleQtyThreshold;
-        return {
-          productId: cartItem.productId,
-          qty: cartItem.qty,
-          unitPrice: isWholesale ? product!.wholesalePrice : product!.basePrice,
-          imeis: product!.requires_imei ? (imeiInputs[cartItem.id!] || []) : undefined,
-        };
+        const unitPrice = cartItem.priceType === 'WHOLESALE' ? product!.wholesalePrice : product!.basePrice;
+        return { productId: cartItem.productId, qty: cartItem.qty, unitPrice, priceType: (cartItem.priceType || 'RETAIL') as 'RETAIL' | 'WHOLESALE' };
       });
 
-      const methodMap: Record<PaymentType, 'CASH' | 'M-PESA' | 'DEBT'> = {
-        Cash: 'CASH',
-        'M-Pesa': 'M-PESA',
-        Debt: 'DEBT',
-      };
+      const methodMap: Record<PaymentType, 'CASH' | 'M-PESA' | 'DEBT'> = { Cash: 'CASH', 'M-Pesa': 'M-PESA', Debt: 'DEBT' };
 
       await processCheckout(cartFormatted, {
-        method: methodMap[paymentType],
-        mpesaRef: paymentType === 'M-Pesa' ? mpesaCode : undefined,
-        customerId: requiresCustomer ? finalCustomerId : undefined,
+        method:        methodMap[paymentType],
+        mpesaRef:      paymentType === 'M-Pesa' ? mpesaCode : undefined,
+        customerId:    requiresCustomer ? finalCustomerId : undefined,
+        customerName:  requiresCustomer ? customerSearch : undefined,
+        customerPhone: requiresCustomer ? customerPhone : undefined,
+        priceType:     hasWholesaleAny ? 'WHOLESALE' : 'RETAIL'
       });
 
       setCheckoutModalOpen(false);
-      setMpesaCode('');
-      setSelectedCustomerId('');
-      setCustomerSearch('');
-      setIsNewCustomer(false);
-      setImeiInputs({});
-      alert('Transaction Completed!');
+      setMpesaCode(''); setSelectedCustomerId(''); setCustomerSearch(''); setCustomerPhone(''); setIsNewCustomer(false);
+      setGlobalPriceMode('RETAIL');
+      alert('Transaction complete!');
     } catch (err) {
       console.error(err);
       alert('Checkout failed.');
-    } finally {
-      setIsProcessing(false);
-    }
+    } finally { setIsProcessing(false); }
   };
 
+  const resetModal = () => {
+    setCheckoutModalOpen(false);
+    setPaymentType('Cash'); setMpesaCode('');
+    setSelectedCustomerId(''); setCustomerSearch(''); setCustomerPhone(''); setIsNewCustomer(false);
+  };
+
+  // ── Payment method selector button style ─────────────────────────────────────
+  const methodBtn = (method: PaymentType): React.CSSProperties => ({
+    display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+    gap: '6px', borderRadius: '10px',
+    border: `2px solid ${paymentType === method ? 'var(--navy)' : 'var(--surface-border)'}`,
+    background: paymentType === method ? 'rgba(26,43,74,0.06)' : '#fff',
+    color: paymentType === method ? 'var(--navy)' : 'var(--text-muted)',
+    fontWeight: 700, fontSize: '0.78rem', cursor: 'pointer',
+    transition: 'all 150ms ease', minHeight: '0', padding: '12px 8px',
+  } as React.CSSProperties);
+
+  // ════════════════════════════════════════════════════════════════════════════
+  //  RENDER
+  // ════════════════════════════════════════════════════════════════════════════
   return (
-    <div className="w-[440px] bg-white border-l border-zinc-200 flex flex-col h-full shadow-2xl z-20 overflow-hidden relative">
-      {/* Sidebar Header */}
-      <div className="p-8 border-b border-zinc-100 flex items-center justify-between bg-zinc-50/50">
-        <div>
-          <h2 className="text-2xl font-black text-zinc-900 tracking-tight leading-none">Register</h2>
-          <p className="text-[10px] text-zinc-400 font-black uppercase tracking-widest mt-2">{user?.name} @ {user?.shopId}</p>
-        </div>
-        <div className="w-12 h-12 bg-indigo-600 rounded-2xl flex items-center justify-center shadow-lg shadow-indigo-100">
-           <ShoppingCart className="text-white" size={20} />
-        </div>
-      </div>
+    <>
+      {/* ── LEAN CART SIDEBAR ─────────────────────────────────────────── */}
+      <div style={{ 
+        display: 'flex', flexDirection: 'column', height: '100%',
+        border: globalPriceMode === 'WHOLESALE' ? '3px solid #C2A56D' : 'none',
+        borderRadius: globalPriceMode === 'WHOLESALE' ? '16px' : '0',
+        margin: globalPriceMode === 'WHOLESALE' ? '-3px' : '0', // Offset border width
+        transition: 'all 200ms ease'
+      }}>
 
-      {/* Cart Content - Bordered Rows */}
-      <div className="flex-1 overflow-y-auto pt-2">
-        {cartItemsResult.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-center p-10">
-            <div className="w-24 h-24 bg-zinc-50 rounded-[2.5rem] flex items-center justify-center mb-6 border border-zinc-100">
-                <ShoppingCart className="text-zinc-200" size={40} />
-            </div>
-            <h3 className="text-xl font-black text-zinc-900">Cart Empty</h3>
-            <p className="text-sm text-zinc-400 font-medium mt-2 leading-relaxed">Touch products on the left to add them to this ticket.</p>
+        {/* ── HIGH-VISIBILITY PRICE TOGGLE ── */}
+        <div style={{ padding: '12px 20px', background: '#F8FAFC', borderBottom: '1px solid var(--surface-border)' }}>
+          <div style={{ 
+            display: 'grid', gridTemplateColumns: '1fr 1fr', 
+            background: '#F1F5F9', // bg-slate-100
+            borderRadius: '12px', padding: '4px', height: '48px' // h-12
+          }}>
+            <button 
+              onClick={() => setGlobalMode('RETAIL')}
+              style={{
+                borderRadius: '8px', border: 'none', minHeight: '0',
+                background: globalPriceMode === 'RETAIL' ? '#2C3947' : 'transparent',
+                color: globalPriceMode === 'RETAIL' ? '#fff' : '#547A95',
+                fontSize: '0.75rem', fontWeight: 800, letterSpacing: '0.05em',
+                transition: 'all 200ms ease'
+              }}
+            >
+              RETAIL
+            </button>
+            <button 
+              onClick={() => setGlobalMode('WHOLESALE')}
+              style={{
+                borderRadius: '8px', border: 'none', minHeight: '0',
+                background: globalPriceMode === 'WHOLESALE' ? '#2C3947' : 'transparent',
+                color: globalPriceMode === 'WHOLESALE' ? '#fff' : '#547A95',
+                fontSize: '0.75rem', fontWeight: 800, letterSpacing: '0.05em',
+                transition: 'all 200ms ease'
+              }}
+            >
+              WHOLESALE
+            </button>
           </div>
-        ) : (
-          <div className="divide-y divide-zinc-100 border-t border-zinc-100">
-            {cartItemsResult.map(({ cartItem, product }) => {
-              if (!product) return null;
-              const isWholesale = cartItem.qty >= product.wholesaleQtyThreshold;
-              const unitPrice = isWholesale ? product.wholesalePrice : product.basePrice;
+        </div>
 
+        {/* Header */}
+        <div style={{
+          padding: '16px 20px',
+          borderBottom: '1px solid var(--surface-border)',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          flexShrink: 0,
+        }}>
+          <div>
+            <h3 style={{ margin: 0, color: 'var(--navy)' }}>Ticket</h3>
+            <p style={{ margin: 0, fontSize: '0.72rem', color: 'var(--text-muted)' }}>
+              {user?.name} · {user?.shopId}
+            </p>
+          </div>
+          <div style={{
+            width: '36px', height: '36px', borderRadius: '10px',
+            background: 'var(--navy)', color: '#fff',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <ShoppingCart size={16} />
+          </div>
+        </div>
+
+        {/* Items list */}
+        <div style={{ flex: 1, overflowY: 'auto' }}>
+          {cartItemsResult.length === 0 ? (
+            <div style={{
+              display: 'flex', flexDirection: 'column', alignItems: 'center',
+              justifyContent: 'center', padding: '48px 24px', gap: '10px', textAlign: 'center'
+            }}>
+              <ShoppingCart size={44} style={{ color: '#6B88A8', opacity: 0.4 }} />
+              <p style={{ margin: 0, fontWeight: 600, color: 'var(--text-muted)', fontSize: '0.9rem' }}>Cart is empty</p>
+              <p style={{ margin: 0, fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                Scan or tap a product to begin.
+              </p>
+            </div>
+          ) : (
+            cartItemsResult.map(({ cartItem, product }) => {
+              if (!product) return null;
+              const unitPrice = cartItem.priceType === 'WHOLESALE' ? product.wholesalePrice : product.basePrice;
               return (
-                <div key={cartItem.id} className="p-6 bg-white hover:bg-zinc-50/50 transition-colors group">
-                  <div className="flex justify-between items-start mb-4">
-                    <div className="flex-1 min-w-0">
-                      <h4 className="font-black text-zinc-900 text-base truncate">{product.name}</h4>
-                      <p className="text-[10px] font-black text-zinc-400 uppercase tracking-widest mt-1">
-                        {product.sku} • {product.category}
-                      </p>
+                <div key={cartItem.id} style={{ padding: '14px 20px', borderBottom: '1px solid var(--surface-border)' }}>
+                  {/* Name + remove */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px' }}>
+                    <div style={{ flex: 1 }}>
+                      <p style={{ margin: 0, fontWeight: 600, fontSize: '0.85rem', color: 'var(--navy)', lineHeight: 1.3 }}>{product.name}</p>
+                      <p style={{ margin: 0, fontSize: '0.72rem', color: 'var(--text-muted)' }}>{product.sku} · {product.category}</p>
                     </div>
-                    <button 
-                      onClick={() => removeCartItem(cartItem.id!)} 
-                      className="w-12 h-12 -mt-2 -mr-2 rounded-2xl flex items-center justify-center text-zinc-200 hover:text-rose-500 hover:bg-rose-50 transition-all active:scale-90"
+                    <button
+                      onClick={() => removeCartItem(cartItem.id!)}
+                      style={{ minHeight: '28px', width: '28px', padding: 0, background: 'transparent', color: '#EF4444', flexShrink: 0 }}
                     >
-                      <Trash2 size={20} />
+                      <Trash2 size={14} />
                     </button>
                   </div>
 
-                  <div className="flex justify-between items-center mt-6">
-                    <div className="flex items-center gap-1 bg-zinc-100 rounded-2xl p-1.5">
-                      <button onClick={() => updateQty(cartItem.id!, -1)} className="w-12 h-12 flex items-center justify-center text-zinc-600 bg-white shadow-sm rounded-xl transition-all active:scale-95"><Minus size={18} /></button>
-                      <span className="w-12 text-center font-black text-zinc-900 text-lg">{cartItem.qty}</span>
-                      <button onClick={() => updateQty(cartItem.id!, 1)} className="w-12 h-12 flex items-center justify-center text-zinc-600 bg-white shadow-sm rounded-xl transition-all active:scale-95"><Plus size={18} /></button>
+                  {/* Qty stepper + price */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', background: 'var(--surface-raised)', borderRadius: '8px', padding: '3px' }}>
+                      <button onClick={() => updateQty(cartItem.id!, -1)} style={{ minHeight: '26px', width: '26px', padding: 0, background: '#fff', border: '1px solid var(--surface-border)', borderRadius: '6px' }}><Minus size={11} /></button>
+                      <span style={{ ...mono, width: '26px', textAlign: 'center', fontWeight: 700, fontSize: '0.85rem' }}>{cartItem.qty}</span>
+                      <button onClick={() => updateQty(cartItem.id!, 1)} style={{ minHeight: '26px', width: '26px', padding: 0, background: '#fff', border: '1px solid var(--surface-border)', borderRadius: '6px' }}><Plus size={11} /></button>
                     </div>
-                    
-                    <div className="text-right">
-                      {isWholesale && (
-                        <span className="text-[9px] font-black text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded uppercase tracking-wider mb-1 inline-block">Wholesale Tier</span>
-                      )}
-                      <p className="font-black text-zinc-900 text-xl tracking-tighter">{formatKSh(unitPrice * cartItem.qty)}</p>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
+                      <button
+                        onClick={() => togglePriceType(cartItem.id!, cartItem.priceType || 'RETAIL')}
+                        style={{
+                          minHeight: '20px', padding: '1px 6px', borderRadius: '4px', fontSize: '0.6rem', fontWeight: 700,
+                          background: cartItem.priceType === 'WHOLESALE' ? '#DCFCE7' : 'transparent',
+                          color:      cartItem.priceType === 'WHOLESALE' ? '#15803D' : 'var(--text-muted)',
+                          border: `1px solid ${cartItem.priceType === 'WHOLESALE' ? '#86EFAC' : 'var(--surface-border)'}`,
+                        }}
+                      >
+                        {cartItem.priceType === 'WHOLESALE' ? 'WS' : 'RTL'}
+                      </button>
+                      <span style={{ ...mono, fontWeight: 700, fontSize: '0.88rem', color: 'var(--navy)' }}>
+                        {formatKSh(unitPrice * cartItem.qty)}
+                      </span>
                     </div>
                   </div>
                 </div>
               );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* Footer / Summary Section */}
-      <div className="p-10 bg-zinc-900 text-white shadow-[0_-20px_50px_rgba(0,0,0,0.2)]">
-        <div className="mb-8">
-            <div className="flex justify-between items-center mb-1">
-                <span className="text-zinc-500 text-[10px] font-black uppercase tracking-[0.3em]">Total Balance</span>
-                <span className="text-zinc-500 font-bold text-[10px] uppercase tracking-widest italic opacity-50">Local Settlement</span>
-            </div>
-            <div className="flex items-baseline justify-between">
-                <span className="text-6xl font-black tracking-tighter text-white">
-                  {formatKSh(total).split('.')[0]}
-                </span>
-                <span className="text-indigo-400 font-black text-2xl">
-                  .{formatKSh(total).split('.')[1] || '00'}
-                </span>
-            </div>
+            })
+          )}
         </div>
 
-        <button
-          onClick={() => cartItemsResult.length > 0 && setCheckoutModalOpen(true)}
-          disabled={cartItemsResult.length === 0}
-          className="w-full bg-indigo-600 hover:bg-indigo-500 text-white h-20 rounded-[1.5rem] font-black text-base uppercase tracking-[0.15em] transition-all shadow-2xl shadow-indigo-900/40 disabled:opacity-20 flex items-center justify-center gap-4 active:scale-[0.98] border-b-4 border-indigo-800"
-        >
-          <CreditCard size={24} />
-          Finalize Transaction
-        </button>
+        {/* Footer: total + CTA */}
+        <div style={{ padding: '16px 20px', borderTop: '1px solid var(--surface-border)', flexShrink: 0, background: '#fff' }}>
+          {hasWholesaleAny && (
+            <div style={{ fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: '#15803D', marginBottom: '8px', textAlign: 'center' }}>
+              ✓ Wholesale Mode Active
+            </div>
+          )}
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '14px' }}>
+            <span style={{ fontSize: '0.72rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--text-muted)' }}>Total</span>
+            <span style={{ ...mono, fontSize: '1.5rem', fontWeight: 800, color: 'var(--navy)', letterSpacing: '-0.02em' }}>
+              {formatKSh(total)}
+            </span>
+          </div>
+
+          <button
+            onClick={() => cartItemsResult.length > 0 && setCheckoutModalOpen(true)}
+            disabled={cartItemsResult.length === 0}
+            style={{ width: '100%', gap: '8px' }}
+          >
+            <CreditCard size={17} />
+            Proceed to Checkout
+          </button>
+        </div>
       </div>
 
-      {/* Modern Checkout Modal */}
+      {/* ── CHECKOUT MODAL OVERLAY ─────────────────────────────────────── */}
       {checkoutModalOpen && (
-        <div className="fixed inset-0 z-[1000] flex items-center justify-center p-6">
-          <div className="absolute inset-0 bg-zinc-900/80 backdrop-blur-xl" onClick={() => setCheckoutModalOpen(false)} />
-          <div className="relative w-full max-w-xl bg-white rounded-[3rem] shadow-2xl overflow-hidden animate-fade-in">
-            <div className="p-10">
-              <div className="flex items-center justify-between mb-10">
-                <div>
-                    <h2 className="text-3xl font-black text-zinc-900 tracking-tight">Checkout</h2>
-                    <p className="text-zinc-400 font-medium mt-1">Select your preferred settlement method</p>
-                </div>
-                <div className="text-right">
-                    <p className="text-[10px] text-zinc-400 font-black uppercase tracking-widest">Total Payable</p>
-                    <p className="text-3xl font-black text-indigo-600">{formatKSh(total)}</p>
-                </div>
+        <div style={{
+          position: 'fixed', inset: 0,
+          background: 'rgba(0,0,0,0.50)',
+          backdropFilter: 'blur(4px)',
+          zIndex: 50,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: '24px',
+        }}>
+          <div className="card-raised" style={{
+            width: '100%', maxWidth: '520px',
+            maxHeight: '90vh', overflowY: 'auto',
+          }}>
+            {/* Modal header */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '24px' }}>
+              <div>
+                <h2 style={{ margin: '0 0 2px' }}>Checkout</h2>
+                <p style={{ margin: 0, fontSize: '0.82rem', color: 'var(--text-muted)' }}>Select settlement method</p>
               </div>
-
-              {/* Payment Methods */}
-              <div className="grid grid-cols-3 gap-4 mb-10">
-                {(['Cash', 'M-Pesa', 'Debt'] as PaymentType[]).map(method => (
-                  <button key={method}
-                    onClick={() => { 
-                      setPaymentType(method); 
-                      setSelectedCustomerId(''); 
-                      setMpesaCode(''); 
-                      setCustomerSearch('');
-                      setIsNewCustomer(false);
-                    }}
-                    className={`flex flex-col items-center justify-center p-6 rounded-[2rem] border-2 transition-all gap-3 group
-                      ${paymentType === method 
-                        ? (method === 'Debt' ? 'border-amber-500 bg-amber-50 text-amber-700' : 'border-indigo-600 bg-indigo-50 text-indigo-700')
-                        : 'border-zinc-100 bg-zinc-50/50 text-zinc-400 hover:border-zinc-200'}`}
-                  >
-                    <div className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-all
-                        ${paymentType === method ? 'bg-white shadow-sm' : 'bg-zinc-100 group-hover:bg-white'}`}>
-                        <span className="text-xl">{method === 'Cash' ? '💵' : method === 'M-Pesa' ? '📱' : '📋'}</span>
-                    </div>
-                    <span className="font-black text-xs uppercase tracking-widest">{method}</span>
-                  </button>
-                ))}
-              </div>
-
-              {/* Dynamic Context Fields */}
-              <div className="space-y-6">
-                {paymentType === 'M-Pesa' && (
-                  <div className="animate-fade-in">
-                    <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-widest mb-3">M-Pesa Confirmation Code</label>
-                    <input type="text" placeholder="e.g. RK9D... " value={mpesaCode}
-                      onChange={e => setMpesaCode(e.target.value.toUpperCase())}
-                      className="w-full bg-zinc-50 border border-zinc-200 p-5 rounded-2xl font-black text-zinc-900 focus:ring-2 focus:ring-indigo-500 outline-none uppercase placeholder:text-zinc-200"
-                    />
-                  </div>
-                )}
-
-                {requiresCustomer && (
-                  <div className="animate-fade-in space-y-4">
-                    <label className="block text-[10px] font-black text-zinc-400 uppercase tracking-widest mb-1">Debtor Lookup</label>
-                    <div className="relative">
-                        <Search className="absolute left-5 top-5 text-zinc-300" size={20} />
-                        <input type="text" placeholder="Name or phone number..." 
-                          value={customerSearch}
-                          onChange={e => {
-                            setCustomerSearch(e.target.value);
-                            if (selectedCustomerId) { setSelectedCustomerId(''); setIsNewCustomer(false); }
-                          }}
-                          className="w-full bg-zinc-50 border border-zinc-200 p-5 pl-14 rounded-2xl font-black text-zinc-900 focus:ring-2 focus:ring-amber-500 outline-none placeholder:text-zinc-200"
-                        />
-                    </div>
-
-                    {customerSearch.length > 1 && !selectedCustomerId && !isNewCustomer && (
-                      <div className="bg-white border border-zinc-100 rounded-3xl overflow-hidden shadow-2xl shadow-zinc-200/50 divide-y divide-zinc-50">
-                        {customers.map(c => (
-                          <button key={c.id} onClick={() => { setSelectedCustomerId(c.id); setCustomerSearch(c.name); }}
-                            className="w-full text-left p-5 hover:bg-zinc-50 flex justify-between items-center group transition-colors">
-                            <span className="font-black text-zinc-900 group-hover:text-amber-600">{c.name}</span>
-                            <div className="flex items-center gap-2">
-                                <span className="text-[10px] text-zinc-300 font-black uppercase tracking-widest">Linked Shop: {c.shopId}</span>
-                                <CheckCircle2 className="text-zinc-200" size={16} />
-                            </div>
-                          </button>
-                        ))}
-                        <button onClick={() => setIsNewCustomer(true)}
-                          className="w-full text-left p-5 bg-amber-50/50 hover:bg-amber-50 flex items-center gap-3 text-amber-600 font-black group transition-all">
-                          <UserPlus size={18} />
-                          <span className="text-sm">Create account for "{customerSearch}"</span>
-                        </button>
-                      </div>
-                    )}
-
-                    {selectedCustomerId && (
-                      <div className="flex items-center justify-between bg-emerald-50 border border-emerald-100 p-5 rounded-2xl">
-                        <div className="flex items-center gap-3">
-                            <CheckCircle2 className="text-emerald-500" size={20} />
-                            <span className="font-black text-emerald-700 text-sm">Account Linked: {customerSearch}</span>
-                        </div>
-                        <button onClick={() => { setSelectedCustomerId(''); setCustomerSearch(''); }} className="text-[10px] font-black text-emerald-800 uppercase tracking-widest hover:underline">Change</button>
-                      </div>
-                    )}
-                    
-                    {isNewCustomer && (
-                      <div className="flex items-center justify-between bg-amber-50 border border-amber-100 p-5 rounded-2xl">
-                        <div className="flex items-center gap-3">
-                            <AlertCircle className="text-amber-600" size={20} />
-                            <span className="font-black text-amber-700 text-sm">New Registry: {customerSearch}</span>
-                        </div>
-                        <button onClick={() => setIsNewCustomer(false)} className="text-[10px] font-black text-amber-800 uppercase tracking-widest hover:underline">Cancel</button>
-                      </div>
-                    )}
-                  </div>
+              <div style={{ textAlign: 'right' }}>
+                <p style={{ margin: '0 0 2px', fontSize: '0.72rem', color: 'var(--text-muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Total Payable</p>
+                <span style={{ ...mono, fontWeight: 800, fontSize: '1.4rem', color: 'var(--navy)' }}>{formatKSh(total)}</span>
+                {hasWholesaleAny && (
+                  <p style={{ margin: 0, fontSize: '0.68rem', color: '#92400E', fontWeight: 600 }}>Broker Validation Required</p>
                 )}
               </div>
+            </div>
 
-              {/* Action Grid */}
-              <div className="grid grid-cols-2 gap-4 mt-12">
-                <button onClick={() => setCheckoutModalOpen(false)}
-                  className="p-5 rounded-2xl border border-zinc-100 text-zinc-400 font-black uppercase tracking-widest text-xs hover:bg-zinc-50 transition-all">
-                  Cancel Transaction
-                </button>
-                <button onClick={handleCheckout}
-                  disabled={isProcessing || (requiresCustomer && !selectedCustomerId && !isNewCustomer)}
-                  className={`p-5 rounded-2xl font-black uppercase tracking-widest text-xs transition-all shadow-xl
-                    ${(requiresCustomer && !selectedCustomerId && !isNewCustomer) 
-                      ? 'bg-zinc-100 text-zinc-300 cursor-not-allowed shadow-none' 
-                      : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-200'}`}
+            {/* Payment method selector */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px', marginBottom: '24px' }}>
+              {(['Cash', 'M-Pesa', 'Debt'] as PaymentType[]).map(method => (
+                <button
+                  key={method}
+                  onClick={() => {
+                    setPaymentType(method);
+                    setSelectedCustomerId(''); setMpesaCode('');
+                    setCustomerSearch(''); setCustomerPhone(''); setIsNewCustomer(false);
+                  }}
+                  style={methodBtn(method)}
                 >
-                  {isProcessing ? 'Finalizing...' : 'Charge Account'}
+                  <span style={{ fontSize: '1.4rem' }}>
+                    {method === 'Cash' ? '💵' : method === 'M-Pesa' ? '📱' : '📋'}
+                  </span>
+                  <span>{method}</span>
                 </button>
-              </div>
+              ))}
+            </div>
+
+            {/* Conditional fields */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              {/* M-Pesa code */}
+              {paymentType === 'M-Pesa' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  <label>M-Pesa Confirmation Code</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. RK9D2XYZ"
+                    value={mpesaCode}
+                    onChange={e => setMpesaCode(e.target.value.toUpperCase())}
+                    style={{ ...mono }}
+                  />
+                </div>
+              )}
+
+              {/* Debt: customer picker or new customer form */}
+              {requiresCustomer && (
+                <div style={{
+                  padding: '16px', borderRadius: '10px',
+                  border: '1.5px solid #FCD34D', background: '#FFFBEB',
+                  display: 'flex', flexDirection: 'column', gap: '12px'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <AlertCircle size={15} style={{ color: '#92400E' }} />
+                      <span style={{ fontWeight: 700, fontSize: '0.82rem', color: '#92400E' }}>Debtor Details</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => { setIsNewCustomer(!isNewCustomer); setSelectedCustomerId(''); }}
+                      style={{
+                        minHeight: '26px', padding: '0 10px', fontSize: '0.65rem', fontWeight: 700,
+                        background: isNewCustomer ? '#FEF3C7' : 'transparent',
+                        color: '#92400E', border: '1px solid #FCD34D', borderRadius: '6px',
+                      }}
+                    >
+                      {isNewCustomer ? 'EXISTING' : '+ NEW CUSTOMER'}
+                    </button>
+                  </div>
+
+                  {!isNewCustomer ? (
+                    <>
+                      <div style={{ position: 'relative' }}>
+                        <Search size={14} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)', pointerEvents: 'none' }} />
+                        <input
+                          type="text"
+                          placeholder="Filter customers…"
+                          value={customerSearch}
+                          onChange={e => setCustomerSearch(e.target.value)}
+                          style={{ paddingLeft: '36px' }}
+                        />
+                      </div>
+
+                      <div style={{ maxHeight: '180px', overflowY: 'auto', borderRadius: '8px', border: '1px solid var(--surface-border)', background: '#fff' }}>
+                        {matchingCustomers.length === 0 ? (
+                          <p style={{ padding: '16px', margin: 0, color: 'var(--text-muted)', fontSize: '0.82rem' }}>No eligible debtors found.</p>
+                        ) : (
+                          matchingCustomers.map(c => (
+                            <button
+                              key={c.id}
+                              type="button"
+                              onClick={() => { setSelectedCustomerId(c.id); setCustomerSearch(c.name); setCustomerPhone(c.phone || ''); }}
+                              style={{
+                                width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                padding: '10px 14px', minHeight: '0', borderRadius: '0',
+                                background: selectedCustomerId === c.id ? 'rgba(26,43,74,0.06)' : 'transparent',
+                                borderLeft: selectedCustomerId === c.id ? '3px solid var(--navy)' : '3px solid transparent',
+                                fontWeight: 400, color: 'var(--text-primary)',
+                              }}
+                            >
+                              <div style={{ textAlign: 'left' }}>
+                                <p style={{ margin: 0, fontWeight: 600, fontSize: '0.85rem', color: 'var(--navy)' }}>{c.name}</p>
+                                <p style={{ margin: 0, fontSize: '0.72rem', color: 'var(--text-muted)' }}>{c.phone || 'No Phone'}</p>
+                              </div>
+                              <span style={{ ...mono, fontSize: '0.82rem', fontWeight: 700, color: '#92400E' }}>
+                                {formatKSh(c.totalBalance || 0)}
+                              </span>
+                            </button>
+                          ))
+                        )}
+                      </div>
+
+                      {selectedCustomerId && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', color: '#15803D', fontWeight: 600 }}>
+                          <CheckCircle2 size={14} /> Account selected: {customerSearch}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', gridColumn: '1 / -1' }}>
+                        <label>New Debtor Name</label>
+                        <input type="text" placeholder="Full Name…" value={customerSearch} onChange={e => setCustomerSearch(e.target.value)} />
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', gridColumn: '1 / -1' }}>
+                        <label>Contact Phone</label>
+                        <input type="text" placeholder="07…" value={customerPhone} onChange={e => setCustomerPhone(e.target.value)} style={mono} />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Action row */}
+            <div style={{ display: 'flex', gap: '12px', marginTop: '24px' }}>
+              <button
+                onClick={resetModal}
+                style={{ flex: 1, background: 'transparent', color: 'var(--text-secondary)', border: '1.5px solid var(--surface-border)' }}
+              >
+                <X size={16} /> Cancel
+              </button>
+              <button
+                onClick={handleCheckout}
+                disabled={!canCheckout}
+                style={{ flex: 2, background: canCheckout ? 'var(--btn-navy)' : '#94A3B8', gap: '8px' }}
+              >
+                <CreditCard size={16} />
+                {isProcessing ? 'Finalizing…' : 'Charge Account'}
+              </button>
             </div>
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 };
 

@@ -17,10 +17,10 @@ export function useSyncEngine(shopId: string) {
     const unsynced = await db.purchases.where('synced').equals(0).toArray();
     if (unsynced.length === 0) return;
 
-    const remotePayload = unsynced.map(p => ({
-      id: p.id,
-      shop_id: p.shopId,
-      product_id: p.productId,
+    const records = unsynced.map(p => ({
+      id: String(p.id),
+      shop_id: String(p.shopId),
+      product_id: String(p.productId),
       recorded_by: p.recordedBy,
       qty: p.qty,
       unit_cost_ksh: p.unitCostKsh,
@@ -30,9 +30,10 @@ export function useSyncEngine(shopId: string) {
       purchased_at: new Date(p.timestamp).toISOString()
     }));
 
-    const { error } = await supabase.from('purchases').upsert(remotePayload);
+    console.log("📤 ATTEMPTING PUSH [purchases]:", records);
+    const { error } = await supabase.from('purchases').upsert(records);
     if (error) {
-      console.error('pushPurchases failed:', error.message);
+      console.error("❌ SUPABASE REJECTED [purchases]:", error);
       throw error;
     }
 
@@ -50,35 +51,43 @@ export function useSyncEngine(shopId: string) {
       
       // 2. Prepare Transaction Header Payload
       const txnPayload = {
-        id: txn.id,
-        shop_id: txn.shopId,
-        staff_id: txn.staffId,
+        id: String(txn.id),
+        shop_id: String(txn.shopId),
+        staff_id: String(txn.staffId),
         total_ksh: txn.totalKsh,
         discount_ksh: txn.discountKsh,
         payment_method: txn.paymentMethod,
         mpesa_ref: txn.mpesaRef,
+        customer_name: txn.customerName,
+        customer_phone: txn.customerPhone,
+        price_type: txn.priceType || 'RETAIL',
+        verification_status: txn.status || 'COMPLETED',
         sale_at: new Date(txn.timestamp).toISOString()
       };
 
       // 3. Upsert Header
+      console.log("📤 ATTEMPTING PUSH [sale_transactions]:", txnPayload);
       const { error: txnError } = await supabase.from('sale_transactions').upsert(txnPayload);
       if (txnError) {
-        console.error(`pushSales header failed for txn ${txn.id}:`, txnError.message);
+        console.error("❌ SUPABASE REJECTED [sale_transactions]:", txnError);
         throw txnError;
       }
 
       // 4. Prepare and Upsert Items
       if (items.length > 0) {
-        const itemsPayload = items.map(i => ({
-          sale_id: i.saleId,
-          product_id: i.productId,
+        const itemsPayload = items.map((i, idx) => ({
+          id: i.id || `si_${txn.id}_${idx}`,
+          sale_id: String(i.saleId),
+          product_id: String(i.productId),
           qty: i.qty,
-          sale_price_ksh: i.salePriceKsh
+          sale_price_ksh: i.salePriceKsh,
+          price_type: i.priceType || 'RETAIL'
         }));
 
+        console.log("📤 ATTEMPTING PUSH [sale_items]:", itemsPayload);
         const { error: itemsError } = await supabase.from('sale_items').upsert(itemsPayload);
         if (itemsError) {
-          console.error(`pushSales items failed for txn ${txn.id}:`, itemsError.message);
+          console.error("❌ SUPABASE REJECTED [sale_items]:", itemsError);
           throw itemsError;
         }
       }
@@ -90,26 +99,49 @@ export function useSyncEngine(shopId: string) {
 
   // 2. Sync Logic: PUSH local logs to Cloud
   const pushInventoryLogs = async () => {
-    const unsynced = await db.inventory_logs.where('synced').equals(0).toArray();
+    const allUnsynced = await db.inventory_logs.where('synced').equals(0).toArray();
+    if (allUnsynced.length === 0) return;
+
+    // 🛡️ Guard: strip zombie records (null ID or legacy shop_1)
+    const validLegacyShops = ['shop_1'];
+    const unsynced = allUnsynced.filter(l =>
+      !!l.id &&
+      !validLegacyShops.includes(l.shopId)
+    );
+
+    const zombieCount = allUnsynced.length - unsynced.length;
+    if (zombieCount > 0) {
+      console.warn(`🧹 Sync Guard: Skipping ${zombieCount} zombie inventory_log records (null ID or shop_1).`);
+      // Delete zombies from local DB so they don't keep blocking sync
+      const zombieIds = allUnsynced
+        .filter(l => !l.id || validLegacyShops.includes(l.shopId))
+        .map(l => l.id)
+        .filter((id): id is string => !!id);
+      if (zombieIds.length > 0) await db.inventory_logs.bulkDelete(zombieIds);
+      await db.inventory_logs.filter(l => !l.id || validLegacyShops.includes(l.shopId)).delete();
+    }
+
     if (unsynced.length === 0) return;
 
     const remotePayload = unsynced.map(l => ({
-      shop_id: l.shopId,
-      product_id: l.productId,
+      id: String(l.id),
+      shop_id: String(l.shopId),
+      product_id: String(l.productId),
       change_type: l.changeType,
       quantity_changed: l.qtyChanged,
       new_balance: l.newBalance,
-      staff_id: l.staffId,
+      staff_id: String(l.staffId),
       created_at: new Date(l.timestamp).toISOString()
     }));
 
-    const { error } = await supabase.from('inventory_logs').insert(remotePayload);
+    console.log("📤 ATTEMPTING PUSH [inventory_logs]:", remotePayload);
+    const { error } = await supabase.from('inventory_logs').upsert(remotePayload);
     if (error) {
-      console.error('pushInventoryLogs failed:', error.message);
+      console.error("❌ SUPABASE REJECTED [inventory_logs]:", error);
       throw error;
     }
 
-    const localIds = unsynced.map(l => l.id).filter((id): id is number => id !== undefined);
+    const localIds = unsynced.map(l => l.id).filter((id): id is string => id !== undefined);
     await db.inventory_logs.where('id').anyOf(localIds).modify({ synced: 1 });
   };
 
@@ -119,16 +151,19 @@ export function useSyncEngine(shopId: string) {
     if (unsynced.length === 0) return;
 
     const remotePayload = unsynced.map((c: Customer) => ({
-      id: c.id,
+      id: String(c.id),
       name: c.name,
       phone: c.phone || null,
       email: c.email || null,
-      shop_id: c.shopId,
+      is_debt_eligible: c.isDebtEligible,
+      total_balance: c.totalBalance,
+      shop_id: String(c.shopId),
     }));
 
+    console.log("📤 ATTEMPTING PUSH [customers]:", remotePayload);
     const { error } = await supabase.from('customers').upsert(remotePayload);
     if (error) {
-      console.error('pushCustomers failed:', error.message);
+      console.error("❌ SUPABASE REJECTED [customers]:", error);
       throw error;
     }
 
@@ -140,12 +175,17 @@ export function useSyncEngine(shopId: string) {
     const unsynced = await db.products.where('synced').equals(0).toArray();
     if (unsynced.length === 0) return;
     const remotePayload = unsynced.map(p => ({
-        id: p.id, sku: p.sku, name: p.name, category: p.category,
-        retail_price_ksh: p.basePrice, wholesale_price: p.wholesalePrice,
-        wholesale_threshold: p.wholesaleQtyThreshold, requires_imei: p.requires_imei
+        id: String(p.id), sku: p.sku, name: p.name, category: p.category,
+        retail_price_ksh: p.basePrice,
+        wholesale_price_ksh: p.wholesalePrice,
+        reorder_level: p.reorderLevel
     }));
+    console.log('📦 Attempting to sync product payload:', remotePayload);
     const { error } = await supabase.from('products').upsert(remotePayload);
-    if (error) { console.error('pushProducts failed:', error.message); throw error; }
+    if (error) {
+      console.error("❌ SUPABASE REJECTED [products]:", error.message, '| Code:', error.code, '| Details:', error.details);
+      throw error;
+    }
     await db.products.where('id').anyOf(unsynced.map(p => p.id)).modify({ synced: 1 });
   };
 
@@ -158,8 +198,8 @@ export function useSyncEngine(shopId: string) {
         id: p.id, sku: p.sku, name: p.name, 
         basePrice: p.retail_price_ksh || p.base_price || 0,
         category: p.category, tags: p.tags || [],
-        wholesaleQtyThreshold: p.wholesale_threshold || 5,
-        wholesalePrice: p.wholesale_price || 0,
+        wholesalePrice: p.wholesale_price_ksh || p.wholesale_price || 0,
+        reorderLevel: p.reorder_level || 10,
         synced: 1 as const
       }));
       await db.products.bulkPut(products);
@@ -172,14 +212,7 @@ export function useSyncEngine(shopId: string) {
     const pendingLogs = await db.inventory_logs.where({ shopId, synced: 0 }).count();
     if (pendingLogs > 0) return;
 
-    // 2. UUID Guard: Supabase 'shop_id' column is a UUID. 
-    // If our local shopId is a slug (like 'warehouse'), skip sync to avoid 400 errors.
-    const isUUID = (str: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-5][0-9a-f]{3}-[089ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(str);
-    if (!isUUID(shopId)) {
-      console.warn(`Skipping pullInventory: '${shopId}' is not a valid UUID for Supabase sync.`);
-      return;
-    }
-
+    // 2. Local-Cloud Sync: Pull inventory for the current active shop
     const { data, error } = await supabase.from('inventory').select('*').eq('shop_id', shopId);
     if (error) {
       console.error('pullInventory failed:', error.message);
@@ -195,6 +228,40 @@ export function useSyncEngine(shopId: string) {
     }
   };
 
+  // PULL Customers (Admin updates eligibility/balance)
+  const pullCustomers = async () => {
+    const { data, error } = await supabase.from('customers').select('*');
+    if (error) throw error;
+    if (data) {
+      const customers = data.map((c: any) => ({
+        id: c.id,
+        name: c.name,
+        phone: c.phone,
+        email: c.email,
+        shopId: c.shop_id,
+        isDebtEligible: c.is_debt_eligible,
+        totalBalance: c.total_balance,
+        synced: 1 as const
+      }));
+      await db.customers.bulkPut(customers);
+    }
+  };
+
+  // PULL Sales (Admin updates status to COMPLETED/REJECTED)
+  const pullSales = async () => {
+    const { data, error } = await supabase.from('sale_transactions').select('*').eq('shop_id', shopId);
+    if (error) throw error;
+    if (data) {
+      for (const txn of data) {
+        // Only update status if it changed to prevent overwriting local edits (though sales are mostly immutable except status)
+        await db.sale_transactions.where('id').equals(txn.id).modify({
+          status: txn.verification_status,
+          synced: 1
+        });
+      }
+    }
+  };
+
   const runSyncCycle = useCallback(async () => {
     if (isSyncingRef.current || !navigator.onLine) return;
     isSyncingRef.current = true;
@@ -207,10 +274,12 @@ export function useSyncEngine(shopId: string) {
       await pushCustomers();
       await pullProducts();
       await pullInventory();
+      await pullCustomers();
+      await pullSales();
       setLastSyncedAt(new Date());
       setStatus('idle');
-    } catch (err) {
-      console.error('Sync failed:', err);
+    } catch (err: any) {
+      console.error('❌ Sync failed:', err.message || err, '| Code:', err.code, '| Details:', err.details);
       setStatus('error');
     } finally {
       isSyncingRef.current = false;
@@ -224,10 +293,42 @@ export function useSyncEngine(shopId: string) {
     const sCount = await db.sale_transactions.where('synced').equals(0).count();
     const lCount = await db.inventory_logs.where('synced').equals(0).count();
     const cCount = await db.customers.where('synced').equals(0).count();
+    
+    const counts = { 
+      products: prodCount, 
+      purchases: pCount, 
+      sales: sCount, 
+      logs: lCount, 
+      customers: cCount 
+    };
+
+    if (prodCount + pCount + sCount + lCount + cCount > 0) {
+      console.log("🔍 DIAGNOSTIC: Unsynced counts:", counts);
+    }
+
     setPendingCount(prodCount + pCount + sCount + lCount + cCount);
   };
 
   useEffect(() => {
+    // FORCE RESET: One-time re-sync for relaxed schema
+    const resetSync = async () => {
+      const resetKey = 'sync_realigned_v2'; // Bumped version to force re-flush
+      if (!localStorage.getItem(resetKey)) {
+        console.log("🚀 SYNC ALIGNMENT: Resetting local synced flags for full re-sync...");
+        // Clear all synced flags to force re-uploading everything with string alignment
+        await db.products.where('synced').equals(1).modify({ synced: 0 });
+        await db.purchases.where('synced').equals(1).modify({ synced: 0 });
+        await db.sale_transactions.where('synced').equals(1).modify({ synced: 0 });
+        await db.inventory_logs.where('synced').equals(1).modify({ synced: 0 });
+        await db.customers.where('synced').equals(1).modify({ synced: 0 });
+        
+        localStorage.setItem(resetKey, 'true');
+        console.log("✅ Sync flags cleared. Starting full re-sync...");
+        runSyncCycle();
+      }
+    };
+    resetSync();
+
     const interval = setInterval(runSyncCycle, 30000);
     const countInterval = setInterval(refreshPendingCount, 5000);
     
